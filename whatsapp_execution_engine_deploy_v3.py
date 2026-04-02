@@ -4,11 +4,12 @@ import os
 import psycopg2
 from datetime import datetime, timedelta
 from openai import OpenAI
+from twilio.rest import Client
+import pytz
 
 app = Flask(__name__)
 CORS(app)
 
-# ------------------ INIT ------------------
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -29,21 +30,27 @@ CREATE TABLE IF NOT EXISTS tasks (
 """)
 conn.commit()
 
-# ------------------ CONFIG ------------------
+IST = pytz.timezone("Asia/Kolkata")
+
 STAFF_USERS = {
     "whatsapp:+916303484136": "maintenance"
 }
 
 ROLE_TO_NUMBER = {v: k for k, v in STAFF_USERS.items()}
 
-# ------------------ AI ------------------
 def ai_classify(message):
     prompt = f'''
-Classify hotel guest request.
+You are an intelligent hotel operations AI.
+
+Rules:
+- AC issues → maintenance, high
+- Cleaning → housekeeping, medium
+- Food → service, medium
+- Urgent discomfort → high
 
 Message: "{message}"
 
-Return JSON:
+Return ONLY JSON:
 {{"intent": "", "task": "", "priority": ""}}
 '''
     try:
@@ -53,29 +60,39 @@ Return JSON:
         )
         import json
         return json.loads(response.choices[0].message.content)
-    except Exception as e:
-        print("AI error:", e)
+    except:
         return {"intent": "general", "task": message, "priority": "low"}
 
-# ------------------ HELPERS ------------------
 def get_deadline(priority):
-    now = datetime.now()
+    now = datetime.utcnow()
     if priority == "high":
         return now + timedelta(minutes=10)
-    if priority == "medium":
+    elif priority == "medium":
         return now + timedelta(minutes=30)
     return now + timedelta(minutes=60)
+
+def send_whatsapp(to_number, message):
+    try:
+        client_twilio = Client(
+            os.environ.get("TWILIO_ACCOUNT_SID"),
+            os.environ.get("TWILIO_AUTH_TOKEN")
+        )
+        client_twilio.messages.create(
+            body=message,
+            from_="whatsapp:+14155238886",
+            to=to_number
+        )
+    except Exception as e:
+        print("Twilio error:", e)
 
 def generate_reply(intent):
     if intent == "maintenance":
         return "Technician is on the way 🔧"
     if intent == "housekeeping":
-        return "Housekeeping will handle it shortly 🧹"
+        return "Housekeeping will handle it 🧹"
     if intent == "service":
-        return "Your request is being prepared 🍽️"
+        return "Service request received 🍽️"
     return "Got it 👍"
-
-# ------------------ ROUTES ------------------
 
 @app.route("/")
 def dashboard():
@@ -88,17 +105,25 @@ def get_tasks():
 
     tasks = []
     for row in rows:
+        created = row[5].replace(tzinfo=pytz.utc).astimezone(IST)
+        deadline = row[6].replace(tzinfo=pytz.utc).astimezone(IST)
+
         tasks.append({
             "id": row[0],
             "message": row[1],
             "intent": row[2],
             "priority": row[3],
             "status": row[4],
-            "created_at": str(row[5]),
-            "deadline": str(row[6]),
+            "created_at": created.strftime("%I:%M:%S %p"),
+            "deadline": deadline.strftime("%I:%M:%S %p"),
             "user": row[7]
         })
+
     return jsonify(tasks)
+
+@app.route("/ai_test")
+def ai_test():
+    return ai_classify("My room is too hot")
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
@@ -106,9 +131,15 @@ def whatsapp():
     user = request.values.get('From', '')
 
     ai = ai_classify(msg)
+
     intent = ai["intent"]
     task_text = ai["task"]
     priority = ai["priority"]
+
+    if "hot" in msg.lower() or "ac" in msg.lower():
+        intent = "maintenance"
+        priority = "high"
+
     deadline = get_deadline(priority)
 
     cur.execute("""
@@ -119,16 +150,21 @@ def whatsapp():
         intent,
         priority,
         "Assigned",
-        datetime.now(),
+        datetime.utcnow(),
         deadline,
         user
     ))
     conn.commit()
 
-    reply = generate_reply(intent)
-    return f"<Response><Message>{reply}</Message></Response>"
+    staff_number = ROLE_TO_NUMBER.get(intent)
+    if staff_number:
+        send_whatsapp(
+            staff_number,
+            f"🚨 New Task:\n{task_text}\nPriority: {priority}"
+        )
 
-# ------------------ RUN ------------------
+    return f"<Response><Message>{generate_reply(intent)}</Message></Response>"
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
