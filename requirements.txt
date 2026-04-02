@@ -1,3 +1,5 @@
 flask
 flask-cors
 twilio
+psycopg2-binary
+openai
