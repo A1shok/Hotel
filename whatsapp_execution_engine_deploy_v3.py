@@ -94,6 +94,22 @@ def generate_reply(intent):
         return "Service request received 🍽️"
     return "Got it 👍"
 
+def handle_staff(msg, user):
+    if "done" in msg.lower():
+        cur.execute("""
+        UPDATE tasks SET status='Completed'
+        WHERE id = (
+            SELECT id FROM tasks
+            WHERE status='Assigned'
+            ORDER BY id DESC
+            LIMIT 1
+        )
+        """)
+        conn.commit()
+        return "<Response><Message>Task marked completed ✅</Message></Response>"
+
+    return "<Response><Message>Update received</Message></Response>"
+
 @app.route("/")
 def dashboard():
     return send_file("manager_dashboard_premium_v3_deploy.html")
@@ -114,8 +130,8 @@ def get_tasks():
             "intent": row[2],
             "priority": row[3],
             "status": row[4],
-            "created_at": created.strftime("%I:%M:%S %p"),
-            "deadline": deadline.strftime("%I:%M:%S %p"),
+            "created_at": created.isoformat(),
+            "deadline": deadline.isoformat(),
             "user": row[7]
         })
 
@@ -129,6 +145,9 @@ def ai_test():
 def whatsapp():
     msg = request.values.get('Body', '')
     user = request.values.get('From', '')
+
+    if user in STAFF_USERS:
+        return handle_staff(msg, user)
 
     ai = ai_classify(msg)
 
