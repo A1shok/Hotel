@@ -60,7 +60,23 @@ def send_whatsapp(to, msg):
  except Exception as e:
   print("Twilio error:", e)
 
-# ✅ NEW FUNCTION (ONLY ADDITION)
+# -------- Layer 2 (NEW) --------
+def should_create_task(message):
+ m = message.lower().strip()
+
+ greetings = ["hi", "hello", "hey"]
+ small_talk = ["thanks", "thank you", "ok", "okay"]
+
+ if m in greetings:
+  return False
+
+ if any(word in m for word in small_talk):
+  return False
+
+ return True
+
+# -------- EXISTING LOGIC (UNCHANGED) --------
+
 def get_icon(message, intent):
  m = message.lower()
 
@@ -75,7 +91,6 @@ def get_icon(message, intent):
 
  return ICON_MAP.get(intent, "📌")
 
-# -------- AI --------
 def ai_classify(message):
  prompt = f"""
 You are a smart hotel operations assistant.
@@ -99,7 +114,6 @@ Return ONLY JSON:
   "reply": "natural response"
 }}
 """
-
  try:
   r = client.chat.completions.create(
    model="gpt-4.1-mini",
@@ -134,7 +148,7 @@ def smart_priority(base, emotion):
 
 @app.route("/")
 def home():
- return send_file("manager_dashboard_premium_v3_deploy.html")
+ return send_file("dashboard.html")
 
 @app.route("/tasks")
 def tasks():
@@ -158,7 +172,7 @@ def whatsapp():
  msg = request.values.get('Body', '')
  user = request.values.get('From', '')
 
- # completion logic
+ # completion logic (unchanged)
  if "done" in msg.lower():
   parts = msg.split()
   task_id = int(parts[1]) if len(parts) > 1 else None
@@ -181,7 +195,6 @@ def whatsapp():
  emotion = detect_emotion(msg)
  priority = smart_priority(base_priority, emotion)
 
- # ✅ ONLY CHANGE HERE
  icon = get_icon(msg, intent)
 
  if emotion == "frustrated":
@@ -189,19 +202,22 @@ def whatsapp():
  else:
   reply = f"{icon} {reply}"
 
- cur.execute("""
- INSERT INTO tasks(message,intent,priority,status,created_at,user_number)
- VALUES(%s,%s,%s,%s,%s,%s)
- """, (msg, intent, priority, "Active", datetime.utcnow(), user))
- conn.commit()
+ # -------- Layer 2 applied HERE --------
+ if should_create_task(msg):
 
- cur.execute("SELECT MAX(id) FROM tasks")
- task_id = cur.fetchone()[0]
+  cur.execute("""
+  INSERT INTO tasks(message,intent,priority,status,created_at,user_number)
+  VALUES(%s,%s,%s,%s,%s,%s)
+  """, (msg, intent, priority, "Active", datetime.utcnow(), user))
+  conn.commit()
 
- send_whatsapp(
-  STAFF_NUMBER,
-  f"{icon} TASK #{task_id}\n{msg}\nPriority: {priority.upper()}"
- )
+  cur.execute("SELECT MAX(id) FROM tasks")
+  task_id = cur.fetchone()[0]
+
+  send_whatsapp(
+   STAFF_NUMBER,
+   f"{icon} TASK #{task_id}\n{msg}\nPriority: {priority.upper()}"
+  )
 
  return f"<Response><Message>{reply}</Message></Response>"
 
