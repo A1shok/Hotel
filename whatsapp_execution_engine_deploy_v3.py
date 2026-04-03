@@ -10,9 +10,12 @@ app = Flask(__name__)
 CORS(app)
 
 # ---------- INIT ----------
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
-conn = psycopg2.connect(os.environ.get("DATABASE_URL"))
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+conn = psycopg2.connect(DATABASE_URL)
 cur = conn.cursor()
 
 cur.execute("""
@@ -91,12 +94,19 @@ def send_whatsapp(to, msg):
 # ---------- AI ----------
 def ai_classify(message):
  prompt = f"""
-Understand hotel request and respond.
+You are a hotel operations AI.
+
+Classify and respond.
+
+Rules:
+- AC, hot, cold → maintenance (high)
+- cleaning/towels → housekeeping (medium)
+- water/food → service (medium)
 
 Message: "{message}"
 
 Return JSON:
-{{"intent":"","task":"","priority":"high","reply":""}}
+{{"intent":"","task":"","priority":"high|medium|low","reply":""}}
 """
  try:
   r = client.chat.completions.create(
@@ -109,7 +119,7 @@ Return JSON:
    "intent": "maintenance",
    "task": message,
    "priority": "high",
-   "reply": "We are handling your request."
+   "reply": "We’ve received your request."
   }
 
 # ---------- EMOTION ----------
@@ -141,10 +151,16 @@ def handle_staff(msg):
 
   if not task_id:
    cur.execute("SELECT id, message FROM tasks WHERE status='Assigned' ORDER BY id DESC LIMIT 1")
-   task_id, task_msg = cur.fetchone()
+   row = cur.fetchone()
+   if not row:
+    return "<Response><Message>No active task</Message></Response>"
+   task_id, task_msg = row
   else:
    cur.execute("SELECT message FROM tasks WHERE id=%s", (task_id,))
-   task_msg = cur.fetchone()[0]
+   row = cur.fetchone()
+   if not row:
+    return "<Response><Message>Invalid task ID</Message></Response>"
+   task_msg = row[0]
 
   cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task_id,))
   conn.commit()
@@ -159,8 +175,11 @@ def handle_staff(msg):
 # ---------- ROUTES ----------
 
 @app.route("/")
-def home():
- return "Hotel AI System Running 🚀"
+def dashboard():
+ try:
+  return send_file("manager_dashboard_premium_v3_deploy.html")
+ except:
+  return "HTML file missing. Upload manager_dashboard_premium_v3_deploy.html"
 
 @app.route("/tasks")
 def tasks():
@@ -171,7 +190,6 @@ def tasks():
  for r in rows:
   created = to_ist(r[5])
   deadline = r[6]
-
   sla, mins = get_sla_status(deadline)
 
   if sla == "overdue" and not r[8]:
@@ -215,7 +233,7 @@ def whatsapp():
  icon = ICON_MAP.get(intent, "📌")
 
  if emotion == "frustrated":
-  reply = f"{icon} We’re really sorry for the inconvenience. This has been prioritized and our team is addressing it immediately."
+  reply = f"{icon} We’re really sorry. This has been prioritized and will be resolved immediately."
  else:
   reply = f"{icon} {reply}"
 
