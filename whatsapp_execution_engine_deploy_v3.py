@@ -78,31 +78,26 @@ def should_create_task(message):
 
  return True
 
-# ---------- LAYER 3 FIXES ----------
+# ---------- LAYER 3 FIX ----------
 
 def is_followup(msg):
  m = msg.lower().strip()
-
  follow_words = ["still", "again", "not received", "same issue"]
-
- if any(w in m for w in follow_words) and len(m.split()) <= 6:
-  return True
-
- return False
+ return any(w in m for w in follow_words) and len(m.split()) <= 6
 
 def is_resolution(msg):
  m = msg.lower()
  return any(w in m for w in ["fixed", "resolved", "working now"])
 
-def get_last_active_task(user):
+def get_last_active_task(user, intent):
  cur.execute("""
- SELECT id FROM tasks
- WHERE user_number=%s AND status='Active'
+ SELECT id, priority FROM tasks
+ WHERE user_number=%s AND status='Active' AND intent=%s
  ORDER BY id DESC LIMIT 1
- """, (user,))
+ """, (user, intent))
  return cur.fetchone()
 
-# ---------- EXISTING ----------
+# ---------- EXISTING (UNCHANGED PROMPT) ----------
 
 def get_icon(message, intent):
  m = message.lower()
@@ -169,7 +164,7 @@ def smart_priority(base, emotion):
 
 @app.route("/")
 def home():
- return send_file("manager_dashboard_premium_v3_deploy.html")
+ return send_file("dashboard.html")
 
 @app.route("/tasks")
 def tasks():
@@ -193,69 +188,6 @@ def whatsapp():
  msg = request.values.get('Body', '')
  user = request.values.get('From', '')
 
- # ---------- COMPLETION COMMAND ----------
- if "done" in msg.lower():
-  parts = msg.split()
-  task_id = int(parts[1]) if len(parts) > 1 else None
-
-  if task_id:
-   cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task_id,))
-   conn.commit()
-
-   for m in MANAGERS:
-    send_whatsapp(m, f"✅ Task #{task_id} completed")
-
-  return "<Response><Message>Task completed</Message></Response>"
-
- # ---------- RESOLUTION FIX ----------
- if is_resolution(msg):
-  last_task = get_last_active_task(user)
-
-  if last_task:
-   task_id = last_task[0]
-
-   cur.execute("""
-   UPDATE tasks SET status='Completed'
-   WHERE id=%s
-   """, (task_id,))
-   conn.commit()
-
-   for m in MANAGERS:
-    send_whatsapp(m, f"✅ Task #{task_id} completed by guest")
-
-   return "<Response><Message>✅ Glad to hear it's resolved. Let us know if you need anything else.</Message></Response>"
-
- # ---------- FOLLOW-UP FIX ----------
- if is_followup(msg):
-  last_task = get_last_active_task(user)
-
-  if last_task:
-   task_id = last_task[0]
-
-   # prevent duplicate escalation
-   cur.execute("SELECT priority FROM tasks WHERE id=%s", (task_id,))
-   current = cur.fetchone()[0]
-
-   if current == "urgent":
-    return "<Response><Message>⚠️ Already escalated. Team is on it.</Message></Response>"
-
-   cur.execute("""
-   UPDATE tasks SET priority='urgent'
-   WHERE id=%s
-   """, (task_id,))
-   conn.commit()
-
-   send_whatsapp(
-    STAFF_NUMBER,
-    f"🚨 TASK #{task_id} ESCALATED\nGuest follow-up: {msg}"
-   )
-
-   for m in MANAGERS:
-    send_whatsapp(m, f"🚨 Task #{task_id} escalated by guest")
-
-   return "<Response><Message>⚠️ We’re really sorry. This has been escalated and will be resolved immediately.</Message></Response>"
-
- # ---------- NORMAL FLOW ----------
  ai = ai_classify(msg)
 
  intent = ai["intent"]
@@ -267,12 +199,41 @@ def whatsapp():
 
  icon = get_icon(msg, intent)
 
- if emotion == "frustrated":
-  reply = f"{icon} We understand your frustration. This has been prioritized immediately."
- else:
-  reply = f"{icon} {reply}"
+ # ---------- RESOLUTION ----------
+ if is_resolution(msg):
+  last_task = get_last_active_task(user, intent)
+  if last_task:
+   task_id = last_task[0]
 
- # ---------- LAYER 2 ----------
+   cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task_id,))
+   conn.commit()
+
+   for m in MANAGERS:
+    send_whatsapp(m, f"✅ Task #{task_id} completed by guest")
+
+   return "<Response><Message>✅ Glad to hear it's resolved.</Message></Response>"
+
+ # ---------- FOLLOW-UP ----------
+ if is_followup(msg):
+  last_task = get_last_active_task(user, intent)
+
+  if last_task:
+   task_id, current_priority = last_task
+
+   if current_priority == "urgent":
+    return "<Response><Message>⚠️ Already escalated.</Message></Response>"
+
+   cur.execute("UPDATE tasks SET priority='urgent' WHERE id=%s", (task_id,))
+   conn.commit()
+
+   send_whatsapp(STAFF_NUMBER, f"🚨 TASK #{task_id} ESCALATED")
+
+   for m in MANAGERS:
+    send_whatsapp(m, f"🚨 Task #{task_id} escalated")
+
+   return "<Response><Message>⚠️ Escalated immediately.</Message></Response>"
+
+ # ---------- NORMAL ----------
  if should_create_task(msg):
 
   cur.execute("""
@@ -288,6 +249,11 @@ def whatsapp():
    STAFF_NUMBER,
    f"{icon} TASK #{task_id}\n{msg}\nPriority: {priority.upper()}"
   )
+
+ if emotion == "frustrated":
+  reply = f"{icon} We understand your frustration."
+ else:
+  reply = f"{icon} {reply}"
 
  return f"<Response><Message>{reply}</Message></Response>"
 
