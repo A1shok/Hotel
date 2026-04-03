@@ -1,57 +1,54 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Hotel AI</title>
-    <style>
-        body {
-            background: #0b1a2b;
-            color: white;
-            font-family: Arial;
-            padding: 20px;
-        }
-
-        .card {
-            background: #1e2f45;
-            padding: 12px;
-            margin: 10px 0;
-            border-radius: 8px;
-        }
-
-        .urgent { color: red; }
-        .high { color: orange; }
-        .medium { color: yellow; }
-    </style>
+<title>Hotel AI</title>
+<style>
+body { background:#0b1a2b; color:white; font-family:Arial; }
+.card { background:#1e2f45; margin:10px; padding:10px; border-radius:8px; }
+</style>
 </head>
+
 <body>
 
-<h1>🏨 Hotel AI Dashboard</h1>
+<h1>🏨 Hotel AI Operations</h1>
 
-<div id="tasks"></div>
+<h2>Active Tasks</h2>
+<div id="active"></div>
+
+<h2>Completed Tasks</h2>
+<div id="completed"></div>
 
 <script>
-async function loadTasks() {
-    const res = await fetch(window.location.origin + "/tasks");
-    const data = await res.json();
+async function loadTasks(){
+ const res = await fetch(window.location.origin + "/tasks");
+ const data = await res.json();
 
-    const container = document.getElementById("tasks");
-    container.innerHTML = "";
+ const active = document.getElementById("active");
+ const completed = document.getElementById("completed");
 
-    data.forEach(t => {
-        const div = document.createElement("div");
-        div.className = "card";
+ active.innerHTML="";
+ completed.innerHTML="";
 
-        div.innerHTML = `
-            <b>#${t.id}</b> - ${t.message}<br>
-            Priority: <span class="${t.priority}">${t.priority}</span><br>
-            Time: ${t.time}
-        `;
+ data.forEach(t=>{
+  const div=document.createElement("div");
+  div.className="card";
 
-        container.appendChild(div);
-    });
+  div.innerHTML=`
+   <b>#${t.id}</b> - ${t.message}<br>
+   Priority: ${t.priority}<br>
+   Time: ${t.time}
+  `;
+
+  if(t.status==="Completed"){
+   completed.appendChild(div);
+  }else{
+   active.appendChild(div);
+  }
+ });
 }
 
 loadTasks();
-setInterval(loadTasks, 3000);
+setInterval(loadTasks,3000);
 </script>
 
 </body>
