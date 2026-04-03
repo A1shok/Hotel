@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import os, psycopg2, json
-from datetime import datetime, timedelta
+from datetime import datetime
 from openai import OpenAI
 from twilio.rest import Client
 import pytz
@@ -9,7 +9,6 @@ import pytz
 app = Flask(__name__)
 CORS(app)
 
-# -------- INIT --------
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 conn = psycopg2.connect(os.environ.get("DATABASE_URL"))
 cur = conn.cursor()
@@ -29,7 +28,6 @@ conn.commit()
 
 IST = pytz.timezone("Asia/Kolkata")
 
-# -------- CONFIG --------
 ICON_MAP = {
  "maintenance": "🔧",
  "housekeeping": "🧹",
@@ -44,7 +42,6 @@ MANAGERS = [
  "whatsapp:+919160373362"
 ]
 
-# -------- HELPERS --------
 def to_ist(dt):
  if dt.tzinfo is None:
   dt = pytz.utc.localize(dt)
@@ -63,25 +60,28 @@ def send_whatsapp(to, msg):
  except Exception as e:
   print("Twilio error:", e)
 
-# -------- AI --------
+# ✅ RESTORED STRONG PROMPT
 def ai_classify(message):
  prompt = f"""
-You are a hotel operations AI.
+You are a smart hotel operations assistant.
 
-Classify the guest request and generate a reply.
+Understand the guest request and return structured JSON.
 
 Rules:
-- AC / temperature → maintenance (high)
-- cleaning / towels → housekeeping (medium)
-- food / water → service (medium)
+- AC, hot, cold, temperature → intent = maintenance, priority = high
+- cleaning, towel, bedsheet → housekeeping, priority = medium
+- water, food → service, priority = medium
+- complaints → high priority
+
+Also generate a natural human-like reply.
 
 Message: "{message}"
 
-Return JSON:
+Return ONLY JSON:
 {{
- "intent": "maintenance|housekeeping|service|general",
- "priority": "low|medium|high",
- "reply": "natural human-like reply"
+  "intent": "maintenance|housekeeping|service|general",
+  "priority": "low|medium|high",
+  "reply": "natural response"
 }}
 """
 
@@ -105,31 +105,21 @@ Return JSON:
    "reply": "We are handling your request."
   }
 
-# -------- EMOTION --------
 def detect_emotion(msg):
  m = msg.lower()
-
- if msg.isupper():
+ if msg.isupper() or any(x in m for x in ["still","again","worst","bad","angry"]):
   return "frustrated"
-
- if any(x in m for x in ["still", "again", "worst", "bad", "angry"]):
-  return "frustrated"
-
  return "normal"
 
 def smart_priority(base, emotion):
  if emotion == "frustrated":
-  if base == "medium":
-   return "high"
-  if base == "high":
-   return "urgent"
+  if base == "medium": return "high"
+  if base == "high": return "urgent"
  return base
-
-# -------- ROUTES --------
 
 @app.route("/")
 def home():
- return send_file("manager_dashboard_premium_v3_deploy.html")
+ return send_file("dashboard.html")
 
 @app.route("/tasks")
 def tasks():
@@ -153,6 +143,20 @@ def whatsapp():
  msg = request.values.get('Body', '')
  user = request.values.get('From', '')
 
+ # ✅ COMPLETION FIX (ONLY ADDITION)
+ if "done" in msg.lower():
+  parts = msg.split()
+  task_id = int(parts[1]) if len(parts) > 1 else None
+
+  if task_id:
+   cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task_id,))
+   conn.commit()
+
+   for m in MANAGERS:
+    send_whatsapp(m, f"✅ Task #{task_id} completed")
+
+  return "<Response><Message>Task completed</Message></Response>"
+
  ai = ai_classify(msg)
 
  intent = ai["intent"]
@@ -169,7 +173,6 @@ def whatsapp():
  else:
   reply = f"{icon} {reply}"
 
- # store task
  cur.execute("""
  INSERT INTO tasks(message,intent,priority,status,created_at,user_number)
  VALUES(%s,%s,%s,%s,%s,%s)
@@ -179,17 +182,12 @@ def whatsapp():
  cur.execute("SELECT MAX(id) FROM tasks")
  task_id = cur.fetchone()[0]
 
- # ALWAYS send to staff
  send_whatsapp(
   STAFF_NUMBER,
-  f"""{icon} TASK #{task_id}
-
-{msg}
-Priority: {priority.upper()}"""
+  f"{icon} TASK #{task_id}\n{msg}\nPriority: {priority.upper()}"
  )
 
  return f"<Response><Message>{reply}</Message></Response>"
 
-# -------- RUN --------
 if __name__ == "__main__":
  app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
