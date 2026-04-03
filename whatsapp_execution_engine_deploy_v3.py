@@ -134,8 +134,7 @@ def smart_priority(base, emotion):
 
 @app.route("/")
 def home():
- return send_file("manager_dashboard_premium_v3_deploy.html
-")
+ return send_file("manager_dashboard_premium_v3_deploy.html")
 
 @app.route("/tasks")
 def tasks():
