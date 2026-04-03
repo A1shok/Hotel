@@ -62,7 +62,8 @@ def send_whatsapp(to, msg):
  except Exception as e:
   print("Twilio error:", e)
 
-# ---------- LAYER 2 (existing) ----------
+# ---------- LAYER 2 ----------
+
 def should_create_task(message):
  m = message.lower().strip()
 
@@ -77,12 +78,21 @@ def should_create_task(message):
 
  return True
 
-# ---------- LAYER 3 (NEW FIX) ----------
+# ---------- LAYER 3 FIXES ----------
 
 def is_followup(msg):
+ m = msg.lower().strip()
+
+ follow_words = ["still", "again", "not received", "same issue"]
+
+ if any(w in m for w in follow_words) and len(m.split()) <= 6:
+  return True
+
+ return False
+
+def is_resolution(msg):
  m = msg.lower()
- keywords = ["still", "again", "not received", "not working", "same issue"]
- return any(k in m for k in keywords)
+ return any(w in m for w in ["fixed", "resolved", "working now"])
 
 def get_last_active_task(user):
  cur.execute("""
@@ -183,7 +193,7 @@ def whatsapp():
  msg = request.values.get('Body', '')
  user = request.values.get('From', '')
 
- # ---------- COMPLETION (existing) ----------
+ # ---------- COMPLETION COMMAND ----------
  if "done" in msg.lower():
   parts = msg.split()
   task_id = int(parts[1]) if len(parts) > 1 else None
@@ -197,21 +207,44 @@ def whatsapp():
 
   return "<Response><Message>Task completed</Message></Response>"
 
- # ---------- FOLLOW-UP FIX (NEW CORE LOGIC) ----------
+ # ---------- RESOLUTION FIX ----------
+ if is_resolution(msg):
+  last_task = get_last_active_task(user)
+
+  if last_task:
+   task_id = last_task[0]
+
+   cur.execute("""
+   UPDATE tasks SET status='Completed'
+   WHERE id=%s
+   """, (task_id,))
+   conn.commit()
+
+   for m in MANAGERS:
+    send_whatsapp(m, f"✅ Task #{task_id} completed by guest")
+
+   return "<Response><Message>✅ Glad to hear it's resolved. Let us know if you need anything else.</Message></Response>"
+
+ # ---------- FOLLOW-UP FIX ----------
  if is_followup(msg):
   last_task = get_last_active_task(user)
 
   if last_task:
    task_id = last_task[0]
 
-   # escalate properly
+   # prevent duplicate escalation
+   cur.execute("SELECT priority FROM tasks WHERE id=%s", (task_id,))
+   current = cur.fetchone()[0]
+
+   if current == "urgent":
+    return "<Response><Message>⚠️ Already escalated. Team is on it.</Message></Response>"
+
    cur.execute("""
    UPDATE tasks SET priority='urgent'
    WHERE id=%s
    """, (task_id,))
    conn.commit()
 
-   # notify staff + manager
    send_whatsapp(
     STAFF_NUMBER,
     f"🚨 TASK #{task_id} ESCALATED\nGuest follow-up: {msg}"
