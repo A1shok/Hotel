@@ -60,7 +60,22 @@ def send_whatsapp(to, msg):
  except Exception as e:
   print("Twilio error:", e)
 
-# ✅ RESTORED STRONG PROMPT
+# ✅ NEW FUNCTION (ONLY ADDITION)
+def get_icon(message, intent):
+ m = message.lower()
+
+ if "towel" in m:
+  return "🧻"
+ if "water" in m:
+  return "🚰"
+ if "food" in m:
+  return "🍽️"
+ if "ac" in m or "temperature" in m:
+  return "🔧"
+
+ return ICON_MAP.get(intent, "📌")
+
+# -------- AI --------
 def ai_classify(message):
  prompt = f"""
 You are a smart hotel operations assistant.
@@ -119,7 +134,8 @@ def smart_priority(base, emotion):
 
 @app.route("/")
 def home():
- return send_file("manager_dashboard_premium_v3_deploy.html")
+ return send_file("manager_dashboard_premium_v3_deploy.html
+")
 
 @app.route("/tasks")
 def tasks():
@@ -143,7 +159,7 @@ def whatsapp():
  msg = request.values.get('Body', '')
  user = request.values.get('From', '')
 
- # ✅ COMPLETION FIX (ONLY ADDITION)
+ # completion logic
  if "done" in msg.lower():
   parts = msg.split()
   task_id = int(parts[1]) if len(parts) > 1 else None
@@ -166,7 +182,8 @@ def whatsapp():
  emotion = detect_emotion(msg)
  priority = smart_priority(base_priority, emotion)
 
- icon = ICON_MAP.get(intent, "📌")
+ # ✅ ONLY CHANGE HERE
+ icon = get_icon(msg, intent)
 
  if emotion == "frustrated":
   reply = f"{icon} We understand your frustration. This has been prioritized immediately."
