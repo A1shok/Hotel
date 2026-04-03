@@ -10,6 +10,7 @@ import pytz
 app = Flask(__name__)
 CORS(app)
 
+# INIT
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -38,19 +39,38 @@ STAFF_USERS = {
 
 ROLE_TO_NUMBER = {v: k for k, v in STAFF_USERS.items()}
 
+# -------- TIME SAFE CONVERSION --------
+def to_ist(dt):
+    if dt.tzinfo is None:
+        dt = pytz.utc.localize(dt)
+    return dt.astimezone(IST)
+
+# -------- SLA CALCULATION --------
+def get_sla_status(deadline):
+    now = datetime.utcnow().replace(tzinfo=pytz.utc)
+    remaining = deadline - now
+
+    seconds = int(remaining.total_seconds())
+
+    if seconds <= 0:
+        return "overdue", 0
+
+    minutes = seconds // 60
+    return "active", minutes
+
+# -------- AI --------
 def ai_classify(message):
     prompt = f'''
-You are an intelligent hotel operations AI.
+Classify hotel request.
 
 Rules:
-- AC issues → maintenance, high
-- Cleaning → housekeeping, medium
-- Food → service, medium
-- Urgent discomfort → high
+- AC/hot → maintenance, high
+- cleaning → housekeeping
+- food → service
 
 Message: "{message}"
 
-Return ONLY JSON:
+Return JSON:
 {{"intent": "", "task": "", "priority": ""}}
 '''
     try:
@@ -63,6 +83,7 @@ Return ONLY JSON:
     except:
         return {"intent": "general", "task": message, "priority": "low"}
 
+# -------- HELPERS --------
 def get_deadline(priority):
     now = datetime.utcnow()
     if priority == "high":
@@ -90,8 +111,6 @@ def generate_reply(intent):
         return "Technician is on the way 🔧"
     if intent == "housekeeping":
         return "Housekeeping will handle it 🧹"
-    if intent == "service":
-        return "Service request received 🍽️"
     return "Got it 👍"
 
 def handle_staff(msg, user):
@@ -106,9 +125,11 @@ def handle_staff(msg, user):
         )
         """)
         conn.commit()
-        return "<Response><Message>Task marked completed ✅</Message></Response>"
+        return "<Response><Message>Task completed ✅</Message></Response>"
 
     return "<Response><Message>Update received</Message></Response>"
+
+# -------- ROUTES --------
 
 @app.route("/")
 def dashboard():
@@ -121,8 +142,11 @@ def get_tasks():
 
     tasks = []
     for row in rows:
-        created = row[5].replace(tzinfo=pytz.utc).astimezone(IST)
-        deadline = row[6].replace(tzinfo=pytz.utc).astimezone(IST)
+        created = to_ist(row[5])
+        deadline = to_ist(row[6])
+
+        # SLA
+        status, minutes_left = get_sla_status(row[6].replace(tzinfo=pytz.utc))
 
         tasks.append({
             "id": row[0],
@@ -132,14 +156,12 @@ def get_tasks():
             "status": row[4],
             "created_at": created.isoformat(),
             "deadline": deadline.isoformat(),
+            "sla_status": status,
+            "minutes_left": minutes_left,
             "user": row[7]
         })
 
     return jsonify(tasks)
-
-@app.route("/ai_test")
-def ai_test():
-    return ai_classify("My room is too hot")
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
@@ -179,7 +201,7 @@ def whatsapp():
     if staff_number:
         send_whatsapp(
             staff_number,
-            f"🚨 New Task:\n{task_text}\nPriority: {priority}"
+            f"🚨 Task: {task_text}\nPriority: {priority}"
         )
 
     return f"<Response><Message>{generate_reply(intent)}</Message></Response>"
