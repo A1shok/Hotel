@@ -1,5 +1,3 @@
-# Full AI + Icon + Smart Messaging System (v9)
-
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import os, psycopg2, json
@@ -58,7 +56,13 @@ def to_ist(dt):
 
 def get_deadline(priority):
  now = datetime.utcnow()
- return now + timedelta(minutes=10)
+ if priority == "urgent":
+  return now + timedelta(minutes=5)
+ if priority == "high":
+  return now + timedelta(minutes=10)
+ if priority == "medium":
+  return now + timedelta(minutes=30)
+ return now + timedelta(minutes=60)
 
 def get_sla_status(deadline):
  now = datetime.utcnow().replace(tzinfo=pytz.utc)
@@ -79,6 +83,23 @@ def send_whatsapp(to,msg):
   )
  except Exception as e:
   print(e)
+
+def detect_emotion(msg):
+ msg_lower = msg.lower()
+ keywords = ["not working","still","again","worst","bad","angry","issue"]
+ if msg.isupper():
+  return "frustrated"
+ if any(k in msg_lower for k in keywords):
+  return "frustrated"
+ return "normal"
+
+def smart_priority(base, emotion):
+ if emotion == "frustrated":
+  if base == "medium":
+   return "high"
+  if base == "high":
+   return "urgent"
+ return base
 
 def ai_classify(message):
  prompt=f"""
@@ -163,10 +184,18 @@ def whatsapp():
 
  intent=ai["intent"]
  task=ai["task"]
+ base_priority=ai["priority"]
  reply=ai["reply"]
- priority=ai["priority"]
+
+ emotion = detect_emotion(msg)
+ priority = smart_priority(base_priority, emotion)
 
  icon=ICON_MAP.get(intent,"📌")
+
+ if emotion == "frustrated":
+  reply = f"{icon} We’re really sorry for the inconvenience. This has been prioritized and our team is addressing it immediately."
+ else:
+  reply = f"{icon} {reply}"
 
  deadline=get_deadline(priority)
 
@@ -182,14 +211,15 @@ def whatsapp():
  staff=ROLE_TO_NUMBER.get(intent)
 
  if staff:
+  urgency = "🚨 URGENT" if priority=="urgent" else ""
   send_whatsapp(staff,f"""{icon} TASK #{task_id}
 
 {task}
-Priority: {priority}
+Priority: {priority.upper()} {urgency}
 
 Reply: done {task_id}""")
 
- return f"<Response><Message>{icon} {reply}</Message></Response>"
+ return f"<Response><Message>{reply}</Message></Response>"
 
 if __name__=="__main__":
  app.run(host="0.0.0.0",port=int(os.environ.get("PORT",5000)))
