@@ -37,7 +37,6 @@ STAFF_USERS = {
     "whatsapp:+916303484136": "maintenance"
 }
 
-# Multiple managers
 MANAGER_NUMBERS = [
     "whatsapp:+917780210871",
     "whatsapp:+919160373362"
@@ -54,13 +53,10 @@ def get_sla_status(deadline):
     now = datetime.utcnow().replace(tzinfo=pytz.utc)
     if deadline.tzinfo is None:
         deadline = pytz.utc.localize(deadline)
-
     remaining = deadline - now
     seconds = int(remaining.total_seconds())
-
     if seconds <= 0:
         return "overdue", 0
-
     return "active", seconds // 60
 
 def get_deadline(priority):
@@ -87,7 +83,6 @@ def send_whatsapp(to_number, message):
 
 def handle_staff(msg, user):
     if "done" in msg.lower():
-
         cur.execute("""
         SELECT id, message FROM tasks
         WHERE status='Assigned'
@@ -104,11 +99,14 @@ def handle_staff(msg, user):
             """, (task_id,))
             conn.commit()
 
-            # Notify all managers
             for manager in MANAGER_NUMBERS:
                 send_whatsapp(
                     manager,
-                    f"✅ Task Completed\nTask #{task_id}\n{task_msg}"
+                    f"""✅ TASK COMPLETED
+
+Task #{task_id}
+{task_msg}
+"""
                 )
 
         return "<Response><Message>Task completed ✅</Message></Response>"
@@ -136,7 +134,11 @@ def get_tasks():
             for manager in MANAGER_NUMBERS:
                 send_whatsapp(
                     manager,
-                    f"🚨 ESCALATION: Task #{row[0]} overdue\n{row[1]}"
+                    f"""🚨 ESCALATION
+
+Task #{row[0]} is overdue
+{row[1]}
+"""
                 )
             cur.execute("UPDATE tasks SET escalated=TRUE WHERE id=%s", (row[0],))
             conn.commit()
@@ -144,14 +146,12 @@ def get_tasks():
         tasks.append({
             "id": row[0],
             "message": row[1],
-            "intent": row[2],
             "priority": row[3],
             "status": row[4],
             "created_at": created.isoformat(),
             "deadline": to_ist(deadline).isoformat(),
             "sla_status": sla_status,
-            "minutes_left": minutes_left,
-            "escalated": row[8]
+            "minutes_left": minutes_left
         })
 
     return jsonify(tasks)
@@ -164,9 +164,9 @@ def whatsapp():
     if user in STAFF_USERS:
         return handle_staff(msg, user)
 
-    intent = "maintenance"
     task_text = msg
     priority = "high"
+    intent = "maintenance"
 
     deadline = get_deadline(priority)
 
@@ -185,10 +185,19 @@ def whatsapp():
     conn.commit()
 
     staff_number = ROLE_TO_NUMBER.get(intent)
-    if staff_number:
-        send_whatsapp(staff_number, f"🚨 Task: {task_text}")
 
-    return "<Response><Message>Task received</Message></Response>"
+    if staff_number:
+        send_whatsapp(
+            staff_number,
+            f"""🚨 NEW TASK ASSIGNED
+
+Task: {task_text}
+Priority: {priority}
+
+Please complete ASAP."""
+        )
+
+    return f"<Response><Message>Thank you! Your request has been assigned to our team. We’ll resolve it shortly 🙌</Message></Response>"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
