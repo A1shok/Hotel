@@ -1,7 +1,8 @@
+# Full AI + Icon + Smart Messaging System (v9)
+
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-import os
-import psycopg2
+import os, psycopg2, json
 from datetime import datetime, timedelta
 from openai import OpenAI
 from twilio.rest import Client
@@ -12,193 +13,183 @@ CORS(app)
 
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
-conn = psycopg2.connect(DATABASE_URL)
+conn = psycopg2.connect(os.environ.get("DATABASE_URL"))
 cur = conn.cursor()
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS tasks (
-    id SERIAL PRIMARY KEY,
-    message TEXT,
-    intent TEXT,
-    priority TEXT,
-    status TEXT,
-    created_at TIMESTAMP,
-    deadline TIMESTAMP,
-    user_number TEXT,
-    escalated BOOLEAN DEFAULT FALSE
+ id SERIAL PRIMARY KEY,
+ message TEXT,
+ intent TEXT,
+ priority TEXT,
+ status TEXT,
+ created_at TIMESTAMP,
+ deadline TIMESTAMP,
+ user_number TEXT,
+ escalated BOOLEAN DEFAULT FALSE
 )
 """)
 conn.commit()
 
 IST = pytz.timezone("Asia/Kolkata")
 
+ICON_MAP = {
+ "maintenance": "🔧",
+ "housekeeping": "🧹",
+ "service": "🛎️",
+ "general": "📌"
+}
+
 STAFF_USERS = {
-    "whatsapp:+916303484136": "maintenance"
+ "whatsapp:+916303484136": "maintenance"
 }
 
 MANAGER_NUMBERS = [
-    "whatsapp:+917780210871",
-    "whatsapp:+919160373362"
+ "whatsapp:+917780210871",
+ "whatsapp:+919160373362"
 ]
 
-ROLE_TO_NUMBER = {v: k for k, v in STAFF_USERS.items()}
+ROLE_TO_NUMBER = {v:k for k,v in STAFF_USERS.items()}
 
 def to_ist(dt):
-    if dt.tzinfo is None:
-        dt = pytz.utc.localize(dt)
-    return dt.astimezone(IST)
-
-def get_sla_status(deadline):
-    now = datetime.utcnow().replace(tzinfo=pytz.utc)
-    if deadline.tzinfo is None:
-        deadline = pytz.utc.localize(deadline)
-    remaining = deadline - now
-    seconds = int(remaining.total_seconds())
-    if seconds <= 0:
-        return "overdue", 0
-    return "active", seconds // 60
+ if dt.tzinfo is None:
+  dt = pytz.utc.localize(dt)
+ return dt.astimezone(IST)
 
 def get_deadline(priority):
-    now = datetime.utcnow()
-    if priority == "high":
-        return now + timedelta(minutes=10)
-    elif priority == "medium":
-        return now + timedelta(minutes=30)
-    return now + timedelta(minutes=60)
+ now = datetime.utcnow()
+ return now + timedelta(minutes=10)
 
-def send_whatsapp(to_number, message):
-    try:
-        client_twilio = Client(
-            os.environ.get("TWILIO_ACCOUNT_SID"),
-            os.environ.get("TWILIO_AUTH_TOKEN")
-        )
-        client_twilio.messages.create(
-            body=message,
-            from_="whatsapp:+14155238886",
-            to=to_number
-        )
-    except Exception as e:
-        print("Twilio error:", e)
+def get_sla_status(deadline):
+ now = datetime.utcnow().replace(tzinfo=pytz.utc)
+ if deadline.tzinfo is None:
+  deadline = pytz.utc.localize(deadline)
+ remaining = deadline - now
+ seconds = int(remaining.total_seconds())
+ return ("overdue",0) if seconds<=0 else ("active",seconds//60)
 
-def handle_staff(msg, user):
-    if "done" in msg.lower():
-        cur.execute("""
-        SELECT id, message FROM tasks
-        WHERE status='Assigned'
-        ORDER BY id DESC LIMIT 1
-        """)
-        task = cur.fetchone()
+def send_whatsapp(to,msg):
+ try:
+  Client(os.environ.get("TWILIO_ACCOUNT_SID"),
+         os.environ.get("TWILIO_AUTH_TOKEN")
+  ).messages.create(
+   body=msg,
+   from_="whatsapp:+14155238886",
+   to=to
+  )
+ except Exception as e:
+  print(e)
 
-        if task:
-            task_id, task_msg = task
+def ai_classify(message):
+ prompt=f"""
+Understand hotel request and reply.
 
-            cur.execute("""
-            UPDATE tasks SET status='Completed'
-            WHERE id=%s
-            """, (task_id,))
-            conn.commit()
+Message: "{message}"
 
-            for manager in MANAGER_NUMBERS:
-                send_whatsapp(
-                    manager,
-                    f"""✅ TASK COMPLETED
-
-Task #{task_id}
-{task_msg}
+Return JSON:
+{{"intent":"","task":"","priority":"high","reply":""}}
 """
-                )
+ try:
+  r=client.chat.completions.create(
+   model="gpt-4.1-mini",
+   messages=[{"role":"user","content":prompt}]
+  )
+  return json.loads(r.choices[0].message.content)
+ except:
+  return {"intent":"maintenance","task":message,"priority":"high","reply":"We are handling your request."}
 
-        return "<Response><Message>Task completed ✅</Message></Response>"
+def handle_staff(msg,user):
+ if "done" in msg.lower():
+  parts=msg.split()
+  task_id=int(parts[1]) if len(parts)>1 else None
 
-    return "<Response><Message>Update received</Message></Response>"
+  if not task_id:
+   cur.execute("SELECT id,message FROM tasks WHERE status='Assigned' ORDER BY id DESC LIMIT 1")
+   task_id,task_msg=cur.fetchone()
+  else:
+   cur.execute("SELECT message FROM tasks WHERE id=%s",(task_id,))
+   task_msg=cur.fetchone()[0]
 
-@app.route("/")
-def dashboard():
-    return send_file("manager_dashboard_premium_v3_deploy.html")
+  cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s",(task_id,))
+  conn.commit()
+
+  for m in MANAGER_NUMBERS:
+   send_whatsapp(m,f"✅ Task #{task_id} completed\n{task_msg}")
+
+  return "<Response><Message>Completed</Message></Response>"
+
+ return "<Response><Message>OK</Message></Response>"
 
 @app.route("/tasks")
-def get_tasks():
-    cur.execute("SELECT * FROM tasks ORDER BY id DESC")
-    rows = cur.fetchall()
+def tasks():
+ cur.execute("SELECT * FROM tasks ORDER BY id DESC")
+ rows=cur.fetchall()
+ data=[]
 
-    tasks = []
+ for r in rows:
+  created=to_ist(r[5])
+  deadline=r[6]
+  sla,mins=get_sla_status(deadline)
 
-    for row in rows:
-        created = to_ist(row[5])
-        deadline = row[6]
+  if sla=="overdue" and not r[8]:
+   icon=ICON_MAP.get(r[2],"📌")
+   for m in MANAGER_NUMBERS:
+    send_whatsapp(m,f"🚨 {icon} Task #{r[0]} overdue\n{r[1]}")
+   cur.execute("UPDATE tasks SET escalated=TRUE WHERE id=%s",(r[0],))
+   conn.commit()
 
-        sla_status, minutes_left = get_sla_status(deadline)
+  data.append({
+   "id":r[0],
+   "message":r[1],
+   "status":r[4],
+   "priority":r[3],
+   "created_at":created.isoformat(),
+   "deadline":to_ist(deadline).isoformat(),
+   "sla":sla,
+   "mins":mins
+  })
 
-        if sla_status == "overdue" and not row[8]:
-            for manager in MANAGER_NUMBERS:
-                send_whatsapp(
-                    manager,
-                    f"""🚨 ESCALATION
+ return jsonify(data)
 
-Task #{row[0]} is overdue
-{row[1]}
-"""
-                )
-            cur.execute("UPDATE tasks SET escalated=TRUE WHERE id=%s", (row[0],))
-            conn.commit()
-
-        tasks.append({
-            "id": row[0],
-            "message": row[1],
-            "priority": row[3],
-            "status": row[4],
-            "created_at": created.isoformat(),
-            "deadline": to_ist(deadline).isoformat(),
-            "sla_status": sla_status,
-            "minutes_left": minutes_left
-        })
-
-    return jsonify(tasks)
-
-@app.route("/whatsapp", methods=["POST"])
+@app.route("/whatsapp",methods=["POST"])
 def whatsapp():
-    msg = request.values.get('Body', '')
-    user = request.values.get('From', '')
+ msg=request.values.get('Body','')
+ user=request.values.get('From','')
 
-    if user in STAFF_USERS:
-        return handle_staff(msg, user)
+ if user in STAFF_USERS:
+  return handle_staff(msg,user)
 
-    task_text = msg
-    priority = "high"
-    intent = "maintenance"
+ ai=ai_classify(msg)
 
-    deadline = get_deadline(priority)
+ intent=ai["intent"]
+ task=ai["task"]
+ reply=ai["reply"]
+ priority=ai["priority"]
 
-    cur.execute("""
-    INSERT INTO tasks (message, intent, priority, status, created_at, deadline, user_number)
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
-    """, (
-        task_text,
-        intent,
-        priority,
-        "Assigned",
-        datetime.utcnow(),
-        deadline,
-        user
-    ))
-    conn.commit()
+ icon=ICON_MAP.get(intent,"📌")
 
-    staff_number = ROLE_TO_NUMBER.get(intent)
+ deadline=get_deadline(priority)
 
-    if staff_number:
-        send_whatsapp(
-            staff_number,
-            f"""🚨 NEW TASK ASSIGNED
+ cur.execute("""
+ INSERT INTO tasks(message,intent,priority,status,created_at,deadline,user_number)
+ VALUES(%s,%s,%s,%s,%s,%s,%s)
+ """,(task,intent,priority,"Assigned",datetime.utcnow(),deadline,user))
+ conn.commit()
 
-Task: {task_text}
+ cur.execute("SELECT MAX(id) FROM tasks")
+ task_id=cur.fetchone()[0]
+
+ staff=ROLE_TO_NUMBER.get(intent)
+
+ if staff:
+  send_whatsapp(staff,f"""{icon} TASK #{task_id}
+
+{task}
 Priority: {priority}
 
-Please complete ASAP."""
-        )
+Reply: done {task_id}""")
 
-    return f"<Response><Message>Thank you! Your request has been assigned to our team. We’ll resolve it shortly 🙌</Message></Response>"
+ return f"<Response><Message>{icon} {reply}</Message></Response>"
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+if __name__=="__main__":
+ app.run(host="0.0.0.0",port=int(os.environ.get("PORT",5000)))
