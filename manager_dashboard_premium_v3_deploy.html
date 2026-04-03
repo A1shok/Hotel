@@ -1,194 +1,94 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Hotel AI Dashboard v3</title>
+    <title>Hotel AI Operations</title>
     <style>
         body {
-            margin: 0;
-            font-family: 'Segoe UI', sans-serif;
-            background: #0f172a;
-            color: #e2e8f0;
-        }
-
-        h1 {
-            text-align: center;
-            margin: 20px 0;
-        }
-
-        .stats {
-            display: flex;
-            gap: 20px;
+            background: #0b1220;
+            color: white;
+            font-family: Arial;
             padding: 20px;
         }
 
         .card {
-            flex: 1;
-            background: rgba(255,255,255,0.05);
-            border-radius: 16px;
-            padding: 20px;
-            text-align: center;
-            backdrop-filter: blur(10px);
-            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-        }
-
-        .card h2 {
-            font-size: 32px;
-            margin: 0;
-        }
-
-        .container {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-            padding: 20px;
-        }
-
-        .column {
-            background: rgba(255,255,255,0.05);
-            border-radius: 16px;
-            padding: 20px;
-        }
-
-        .task {
-            background: rgba(255,255,255,0.08);
+            background: #1c253a;
             padding: 15px;
             margin: 10px 0;
-            border-radius: 12px;
-            transition: 0.3s;
+            border-radius: 10px;
         }
 
-        .task:hover {
-            transform: scale(1.02);
+        .high { color: red; }
+        .low { color: lightgreen; }
+
+        .overdue {
+            color: red;
+            font-weight: bold;
         }
 
-        .high { border-left: 4px solid #ef4444; }
-        .medium { border-left: 4px solid #f59e0b; }
-        .low { border-left: 4px solid #22c55e; }
-
-        .badge {
-            padding: 4px 8px;
-            border-radius: 6px;
-            font-size: 12px;
-            margin-right: 5px;
-        }
-
-        .status { background: #1e293b; }
-        .priority-high { background: #7f1d1d; }
-        .priority-medium { background: #78350f; }
-        .priority-low { background: #14532d; }
-
-        .delayed {
-            animation: pulse 1s infinite;
-        }
-
-        @keyframes pulse {
-            0% { box-shadow: 0 0 0px red; }
-            50% { box-shadow: 0 0 10px red; }
-            100% { box-shadow: 0 0 0px red; }
-        }
-
-        .escalated {
-            border: 2px solid red;
+        .active {
+            color: orange;
         }
     </style>
 </head>
+
 <body>
 
 <h1>🏨 Hotel AI Operations</h1>
 
-<div class="stats">
-    <div class="card"><h2 id="total">0</h2><p>Total</p></div>
-    <div class="card"><h2 id="active">0</h2><p>Active</p></div>
-    <div class="card"><h2 id="delayed">0</h2><p>Delayed</p></div>
-    <div class="card"><h2 id="escalated">0</h2><p>Escalated</p></div>
-</div>
+<h2>Active Tasks</h2>
+<div id="active"></div>
 
-<div class="container">
-    <div class="column">
-        <h3>Active</h3>
-        <div id="activeTasks"></div>
-    </div>
-
-    <div class="column">
-        <h3>Completed</h3>
-        <div id="completedTasks"></div>
-    </div>
-</div>
+<h2>Completed Tasks</h2>
+<div id="completed"></div>
 
 <script>
-function formatTime(ts) {
-    if (!ts) return "";
-    return new Date(ts).toLocaleTimeString();
+
+function renderTask(task) {
+    let slaText = "";
+
+    if (task.sla_status === "overdue") {
+        slaText = `<div class="overdue">🚨 OVERDUE</div>`;
+    } else {
+        slaText = `<div class="active">⏳ ${task.minutes_left} min left</div>`;
+    }
+
+    return `
+        <div class="card">
+            <b>#${task.id} - ${task.message}</b><br>
+            Status: ${task.status}<br>
+            Priority: <span class="${task.priority}">${task.priority}</span><br>
+            Created: ${new Date(task.created_at).toLocaleTimeString()}<br>
+            Deadline: ${new Date(task.deadline).toLocaleTimeString()}<br>
+            ${slaText}
+        </div>
+    `;
 }
 
-function assigned(intent) {
-    if (intent === "maintenance") return "Technician";
-    if (intent === "service") return "Room Service";
-    return "Staff";
+function loadTasks() {
+    fetch('/tasks')
+        .then(res => res.json())
+        .then(data => {
+            let activeHTML = "";
+            let completedHTML = "";
+
+            data.forEach(task => {
+                if (task.status === "Completed") {
+                    completedHTML += renderTask(task);
+                } else {
+                    activeHTML += renderTask(task);
+                }
+            });
+
+            document.getElementById("active").innerHTML = activeHTML;
+            document.getElementById("completed").innerHTML = completedHTML;
+        });
 }
 
-async function load() {
-    const res = await fetch('/tasks');
-    const tasks = await res.json();
+// refresh every 5 seconds (live dashboard feel)
+setInterval(loadTasks, 5000);
 
-    let total = tasks.length;
-    let active = 0;
-    let delayed = 0;
-    let escalated = 0;
+loadTasks();
 
-    let now = new Date();
-
-    let aDiv = document.getElementById('activeTasks');
-    let cDiv = document.getElementById('completedTasks');
-
-    aDiv.innerHTML = "";
-    cDiv.innerHTML = "";
-
-    tasks.reverse().forEach(t => {
-        let el = document.createElement('div');
-        el.className = 'task ' + (t.priority || 'low');
-
-        let isDelayed = false;
-        if (t.deadline && t.status !== "Completed") {
-            if (now > new Date(t.deadline)) {
-                isDelayed = true;
-                delayed++;
-                el.classList.add('delayed');
-            }
-        }
-
-        if (t.escalated) {
-            escalated++;
-            el.classList.add('escalated');
-        }
-
-        el.innerHTML = `
-            <b>#${t.id} - ${t.message}</b><br/>
-            <span class="badge status">${t.status}</span>
-            <span class="badge priority-${t.priority}">${t.priority}</span><br/>
-            Assigned: ${assigned(t.intent)}<br/>
-            Created: ${formatTime(t.created_at)}<br/>
-            Deadline: ${formatTime(t.deadline)}<br/>
-            ${isDelayed ? "⚠️ Delayed<br/>" : ""}
-            ${t.escalated ? "🚨 Escalated" : ""}
-        `;
-
-        if (t.status === "Completed") {
-            cDiv.appendChild(el);
-        } else {
-            active++;
-            aDiv.appendChild(el);
-        }
-    });
-
-    document.getElementById('total').innerText = total;
-    document.getElementById('active').innerText = active;
-    document.getElementById('delayed').innerText = delayed;
-    document.getElementById('escalated').innerText = escalated;
-}
-
-setInterval(load, 3000);
-load();
 </script>
 
 </body>
