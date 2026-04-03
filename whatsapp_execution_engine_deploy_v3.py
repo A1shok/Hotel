@@ -10,7 +10,6 @@ import pytz
 app = Flask(__name__)
 CORS(app)
 
-# INIT
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -26,7 +25,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     status TEXT,
     created_at TIMESTAMP,
     deadline TIMESTAMP,
-    user_number TEXT
+    user_number TEXT,
+    escalated BOOLEAN DEFAULT FALSE
 )
 """)
 conn.commit()
@@ -37,53 +37,32 @@ STAFF_USERS = {
     "whatsapp:+916303484136": "maintenance"
 }
 
+# Multiple managers
+MANAGER_NUMBERS = [
+    "whatsapp:+917780210871",
+    "whatsapp:+919160373362"
+]
+
 ROLE_TO_NUMBER = {v: k for k, v in STAFF_USERS.items()}
 
-# -------- TIME SAFE CONVERSION --------
 def to_ist(dt):
     if dt.tzinfo is None:
         dt = pytz.utc.localize(dt)
     return dt.astimezone(IST)
 
-# -------- SLA CALCULATION --------
 def get_sla_status(deadline):
     now = datetime.utcnow().replace(tzinfo=pytz.utc)
-    remaining = deadline - now
+    if deadline.tzinfo is None:
+        deadline = pytz.utc.localize(deadline)
 
+    remaining = deadline - now
     seconds = int(remaining.total_seconds())
 
     if seconds <= 0:
         return "overdue", 0
 
-    minutes = seconds // 60
-    return "active", minutes
+    return "active", seconds // 60
 
-# -------- AI --------
-def ai_classify(message):
-    prompt = f'''
-Classify hotel request.
-
-Rules:
-- AC/hot → maintenance, high
-- cleaning → housekeeping
-- food → service
-
-Message: "{message}"
-
-Return JSON:
-{{"intent": "", "task": "", "priority": ""}}
-'''
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        import json
-        return json.loads(response.choices[0].message.content)
-    except:
-        return {"intent": "general", "task": message, "priority": "low"}
-
-# -------- HELPERS --------
 def get_deadline(priority):
     now = datetime.utcnow()
     if priority == "high":
@@ -106,30 +85,35 @@ def send_whatsapp(to_number, message):
     except Exception as e:
         print("Twilio error:", e)
 
-def generate_reply(intent):
-    if intent == "maintenance":
-        return "Technician is on the way 🔧"
-    if intent == "housekeeping":
-        return "Housekeeping will handle it 🧹"
-    return "Got it 👍"
-
 def handle_staff(msg, user):
     if "done" in msg.lower():
+
         cur.execute("""
-        UPDATE tasks SET status='Completed'
-        WHERE id = (
-            SELECT id FROM tasks
-            WHERE status='Assigned'
-            ORDER BY id DESC
-            LIMIT 1
-        )
+        SELECT id, message FROM tasks
+        WHERE status='Assigned'
+        ORDER BY id DESC LIMIT 1
         """)
-        conn.commit()
+        task = cur.fetchone()
+
+        if task:
+            task_id, task_msg = task
+
+            cur.execute("""
+            UPDATE tasks SET status='Completed'
+            WHERE id=%s
+            """, (task_id,))
+            conn.commit()
+
+            # Notify all managers
+            for manager in MANAGER_NUMBERS:
+                send_whatsapp(
+                    manager,
+                    f"✅ Task Completed\nTask #{task_id}\n{task_msg}"
+                )
+
         return "<Response><Message>Task completed ✅</Message></Response>"
 
     return "<Response><Message>Update received</Message></Response>"
-
-# -------- ROUTES --------
 
 @app.route("/")
 def dashboard():
@@ -141,12 +125,21 @@ def get_tasks():
     rows = cur.fetchall()
 
     tasks = []
+
     for row in rows:
         created = to_ist(row[5])
-        deadline = to_ist(row[6])
+        deadline = row[6]
 
-        # SLA
-        status, minutes_left = get_sla_status(row[6].replace(tzinfo=pytz.utc))
+        sla_status, minutes_left = get_sla_status(deadline)
+
+        if sla_status == "overdue" and not row[8]:
+            for manager in MANAGER_NUMBERS:
+                send_whatsapp(
+                    manager,
+                    f"🚨 ESCALATION: Task #{row[0]} overdue\n{row[1]}"
+                )
+            cur.execute("UPDATE tasks SET escalated=TRUE WHERE id=%s", (row[0],))
+            conn.commit()
 
         tasks.append({
             "id": row[0],
@@ -155,10 +148,10 @@ def get_tasks():
             "priority": row[3],
             "status": row[4],
             "created_at": created.isoformat(),
-            "deadline": deadline.isoformat(),
-            "sla_status": status,
+            "deadline": to_ist(deadline).isoformat(),
+            "sla_status": sla_status,
             "minutes_left": minutes_left,
-            "user": row[7]
+            "escalated": row[8]
         })
 
     return jsonify(tasks)
@@ -171,15 +164,9 @@ def whatsapp():
     if user in STAFF_USERS:
         return handle_staff(msg, user)
 
-    ai = ai_classify(msg)
-
-    intent = ai["intent"]
-    task_text = ai["task"]
-    priority = ai["priority"]
-
-    if "hot" in msg.lower() or "ac" in msg.lower():
-        intent = "maintenance"
-        priority = "high"
+    intent = "maintenance"
+    task_text = msg
+    priority = "high"
 
     deadline = get_deadline(priority)
 
@@ -199,12 +186,9 @@ def whatsapp():
 
     staff_number = ROLE_TO_NUMBER.get(intent)
     if staff_number:
-        send_whatsapp(
-            staff_number,
-            f"🚨 Task: {task_text}\nPriority: {priority}"
-        )
+        send_whatsapp(staff_number, f"🚨 Task: {task_text}")
 
-    return f"<Response><Message>{generate_reply(intent)}</Message></Response>"
+    return "<Response><Message>Task received</Message></Response>"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
