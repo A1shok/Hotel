@@ -1,94 +1,51 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Hotel AI Operations</title>
+    <title>Hotel AI</title>
     <style>
         body {
-            background: #0b1220;
+            background: #0b1a2b;
             color: white;
             font-family: Arial;
             padding: 20px;
         }
-
-        .card {
-            background: #1c253a;
-            padding: 15px;
-            margin: 10px 0;
-            border-radius: 10px;
-        }
-
-        .high { color: red; }
-        .low { color: lightgreen; }
-
-        .overdue {
-            color: red;
-            font-weight: bold;
-        }
-
-        .active {
-            color: orange;
+        .task {
+            background: #1e2f45;
+            padding: 10px;
+            margin: 10px;
+            border-radius: 8px;
         }
     </style>
 </head>
-
 <body>
 
 <h1>🏨 Hotel AI Operations</h1>
 
 <h2>Active Tasks</h2>
-<div id="active"></div>
-
-<h2>Completed Tasks</h2>
-<div id="completed"></div>
+<div id="tasks"></div>
 
 <script>
+async function loadTasks() {
+    const res = await fetch(window.location.origin + "/tasks");
+    const data = await res.json();
 
-function renderTask(task) {
-    let slaText = "";
+    const container = document.getElementById("tasks");
+    container.innerHTML = "";
 
-    if (task.sla_status === "overdue") {
-        slaText = `<div class="overdue">🚨 OVERDUE</div>`;
-    } else {
-        slaText = `<div class="active">⏳ ${task.minutes_left} min left</div>`;
-    }
-
-    return `
-        <div class="card">
-            <b>#${task.id} - ${task.message}</b><br>
-            Status: ${task.status}<br>
-            Priority: <span class="${task.priority}">${task.priority}</span><br>
-            Created: ${new Date(task.created_at).toLocaleTimeString()}<br>
-            Deadline: ${new Date(task.deadline).toLocaleTimeString()}<br>
-            ${slaText}
-        </div>
-    `;
+    data.forEach(task => {
+        const div = document.createElement("div");
+        div.className = "task";
+        div.innerHTML = `
+            <b>#${task.id}</b> - ${task.message}<br>
+            Priority: ${task.priority}<br>
+            Time: ${task.created_at}
+        `;
+        container.appendChild(div);
+    });
 }
-
-function loadTasks() {
-    fetch('/tasks')
-        .then(res => res.json())
-        .then(data => {
-            let activeHTML = "";
-            let completedHTML = "";
-
-            data.forEach(task => {
-                if (task.status === "Completed") {
-                    completedHTML += renderTask(task);
-                } else {
-                    activeHTML += renderTask(task);
-                }
-            });
-
-            document.getElementById("active").innerHTML = activeHTML;
-            document.getElementById("completed").innerHTML = completedHTML;
-        });
-}
-
-// refresh every 5 seconds (live dashboard feel)
-setInterval(loadTasks, 5000);
 
 loadTasks();
-
+setInterval(loadTasks, 3000);
 </script>
 
 </body>
