@@ -9,13 +9,9 @@ import pytz
 app = Flask(__name__)
 CORS(app)
 
-# ---------- INIT ----------
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-DATABASE_URL = os.environ.get("DATABASE_URL")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-conn = psycopg2.connect(DATABASE_URL)
+# -------- INIT --------
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+conn = psycopg2.connect(os.environ.get("DATABASE_URL"))
 cur = conn.cursor()
 
 cur.execute("""
@@ -26,16 +22,14 @@ CREATE TABLE IF NOT EXISTS tasks (
  priority TEXT,
  status TEXT,
  created_at TIMESTAMP,
- deadline TIMESTAMP,
- user_number TEXT,
- escalated BOOLEAN DEFAULT FALSE
+ user_number TEXT
 )
 """)
 conn.commit()
 
 IST = pytz.timezone("Asia/Kolkata")
 
-# ---------- CONFIG ----------
+# -------- CONFIG --------
 ICON_MAP = {
  "maintenance": "🔧",
  "housekeeping": "🧹",
@@ -43,40 +37,18 @@ ICON_MAP = {
  "general": "📌"
 }
 
-STAFF_USERS = {
- "whatsapp:+916303484136": "maintenance"
-}
+STAFF_NUMBER = "whatsapp:+916303484136"
 
-MANAGER_NUMBERS = [
+MANAGERS = [
  "whatsapp:+917780210871",
  "whatsapp:+919160373362"
 ]
 
-ROLE_TO_NUMBER = {v: k for k, v in STAFF_USERS.items()}
-
-# ---------- HELPERS ----------
+# -------- HELPERS --------
 def to_ist(dt):
  if dt.tzinfo is None:
   dt = pytz.utc.localize(dt)
  return dt.astimezone(IST)
-
-def get_deadline(priority):
- now = datetime.utcnow()
- if priority == "urgent":
-  return now + timedelta(minutes=5)
- if priority == "high":
-  return now + timedelta(minutes=10)
- if priority == "medium":
-  return now + timedelta(minutes=30)
- return now + timedelta(minutes=60)
-
-def get_sla_status(deadline):
- now = datetime.utcnow().replace(tzinfo=pytz.utc)
- if deadline.tzinfo is None:
-  deadline = pytz.utc.localize(deadline)
- remaining = deadline - now
- seconds = int(remaining.total_seconds())
- return ("overdue", 0) if seconds <= 0 else ("active", seconds // 60)
 
 def send_whatsapp(to, msg):
  try:
@@ -91,46 +63,56 @@ def send_whatsapp(to, msg):
  except Exception as e:
   print("Twilio error:", e)
 
-# ---------- AI ----------
+# -------- AI --------
 def ai_classify(message):
  prompt = f"""
 You are a hotel operations AI.
 
-Classify and respond.
+Classify the guest request and generate a reply.
 
 Rules:
-- AC, hot, cold → maintenance (high)
-- cleaning/towels → housekeeping (medium)
-- water/food → service (medium)
+- AC / temperature → maintenance (high)
+- cleaning / towels → housekeeping (medium)
+- food / water → service (medium)
 
 Message: "{message}"
 
 Return JSON:
-{{"intent":"","task":"","priority":"high|medium|low","reply":""}}
+{{
+ "intent": "maintenance|housekeeping|service|general",
+ "priority": "low|medium|high",
+ "reply": "natural human-like reply"
+}}
 """
+
  try:
   r = client.chat.completions.create(
    model="gpt-4.1-mini",
    messages=[{"role": "user", "content": prompt}]
   )
-  return json.loads(r.choices[0].message.content)
- except:
+  content = r.choices[0].message.content.strip()
+
+  if content.startswith("```"):
+   content = content.split("```")[1]
+
+  return json.loads(content)
+
+ except Exception as e:
+  print("AI ERROR:", e)
   return {
    "intent": "maintenance",
-   "task": message,
    "priority": "high",
-   "reply": "We’ve received your request."
+   "reply": "We are handling your request."
   }
 
-# ---------- EMOTION ----------
+# -------- EMOTION --------
 def detect_emotion(msg):
- msg_lower = msg.lower()
- keywords = ["not working", "still", "again", "worst", "bad", "angry"]
+ m = msg.lower()
 
  if msg.isupper():
   return "frustrated"
 
- if any(k in msg_lower for k in keywords):
+ if any(x in m for x in ["still", "again", "worst", "bad", "angry"]):
   return "frustrated"
 
  return "normal"
@@ -143,71 +125,25 @@ def smart_priority(base, emotion):
    return "urgent"
  return base
 
-# ---------- STAFF ----------
-def handle_staff(msg):
- if "done" in msg.lower():
-  parts = msg.split()
-  task_id = int(parts[1]) if len(parts) > 1 else None
-
-  if not task_id:
-   cur.execute("SELECT id, message FROM tasks WHERE status='Assigned' ORDER BY id DESC LIMIT 1")
-   row = cur.fetchone()
-   if not row:
-    return "<Response><Message>No active task</Message></Response>"
-   task_id, task_msg = row
-  else:
-   cur.execute("SELECT message FROM tasks WHERE id=%s", (task_id,))
-   row = cur.fetchone()
-   if not row:
-    return "<Response><Message>Invalid task ID</Message></Response>"
-   task_msg = row[0]
-
-  cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task_id,))
-  conn.commit()
-
-  for m in MANAGER_NUMBERS:
-   send_whatsapp(m, f"✅ Task #{task_id} completed\n{task_msg}")
-
-  return "<Response><Message>Task completed ✅</Message></Response>"
-
- return "<Response><Message>Update received</Message></Response>"
-
-# ---------- ROUTES ----------
+# -------- ROUTES --------
 
 @app.route("/")
-def dashboard():
- try:
-  return send_file("manager_dashboard_premium_v3_deploy.html")
- except:
-  return "HTML file missing. Upload manager_dashboard_premium_v3_deploy.html"
+def home():
+ return send_file("dashboard.html")
 
 @app.route("/tasks")
 def tasks():
  cur.execute("SELECT * FROM tasks ORDER BY id DESC")
  rows = cur.fetchall()
+
  data = []
-
  for r in rows:
-  created = to_ist(r[5])
-  deadline = r[6]
-  sla, mins = get_sla_status(deadline)
-
-  if sla == "overdue" and not r[8]:
-   icon = ICON_MAP.get(r[2], "📌")
-   for m in MANAGER_NUMBERS:
-    send_whatsapp(m, f"🚨 {icon} Task #{r[0]} overdue\n{r[1]}")
-   cur.execute("UPDATE tasks SET escalated=TRUE WHERE id=%s", (r[0],))
-   conn.commit()
-
   data.append({
    "id": r[0],
    "message": r[1],
    "priority": r[3],
    "status": r[4],
-   "created_at": created.isoformat(),
-   "deadline": to_ist(deadline).isoformat(),
-   "sla": sla,
-   "mins": mins
+   "time": to_ist(r[5]).strftime("%H:%M:%S")
   })
 
  return jsonify(data)
@@ -217,13 +153,9 @@ def whatsapp():
  msg = request.values.get('Body', '')
  user = request.values.get('From', '')
 
- if user in STAFF_USERS:
-  return handle_staff(msg)
-
  ai = ai_classify(msg)
 
  intent = ai["intent"]
- task = ai["task"]
  base_priority = ai["priority"]
  reply = ai["reply"]
 
@@ -233,37 +165,31 @@ def whatsapp():
  icon = ICON_MAP.get(intent, "📌")
 
  if emotion == "frustrated":
-  reply = f"{icon} We’re really sorry. This has been prioritized and will be resolved immediately."
+  reply = f"{icon} We understand your frustration. This has been prioritized immediately."
  else:
   reply = f"{icon} {reply}"
 
- deadline = get_deadline(priority)
-
+ # store task
  cur.execute("""
- INSERT INTO tasks(message,intent,priority,status,created_at,deadline,user_number)
- VALUES(%s,%s,%s,%s,%s,%s,%s)
- """, (task, intent, priority, "Assigned", datetime.utcnow(), deadline, user))
+ INSERT INTO tasks(message,intent,priority,status,created_at,user_number)
+ VALUES(%s,%s,%s,%s,%s,%s)
+ """, (msg, intent, priority, "Active", datetime.utcnow(), user))
  conn.commit()
 
  cur.execute("SELECT MAX(id) FROM tasks")
  task_id = cur.fetchone()[0]
 
- staff = ROLE_TO_NUMBER.get(intent)
+ # ALWAYS send to staff
+ send_whatsapp(
+  STAFF_NUMBER,
+  f"""{icon} TASK #{task_id}
 
- if staff:
-  urgency = "🚨 URGENT" if priority == "urgent" else ""
-  send_whatsapp(
-   staff,
-   f"""{icon} TASK #{task_id}
-
-{task}
-Priority: {priority.upper()} {urgency}
-
-Reply: done {task_id}"""
-  )
+{msg}
+Priority: {priority.upper()}"""
+ )
 
  return f"<Response><Message>{reply}</Message></Response>"
 
-# ---------- RUN ----------
+# -------- RUN --------
 if __name__ == "__main__":
  app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
