@@ -42,6 +42,8 @@ MANAGERS = [
  "whatsapp:+919160373362"
 ]
 
+# ---------- HELPERS ----------
+
 def to_ist(dt):
  if dt.tzinfo is None:
   dt = pytz.utc.localize(dt)
@@ -60,14 +62,14 @@ def send_whatsapp(to, msg):
  except Exception as e:
   print("Twilio error:", e)
 
-# -------- Layer 2 (NEW) --------
+# ---------- LAYER 2 (existing) ----------
 def should_create_task(message):
  m = message.lower().strip()
 
  greetings = ["hi", "hello", "hey"]
  small_talk = ["thanks", "thank you", "ok", "okay"]
 
- if m in greetings:
+ if m.startswith(tuple(greetings)):
   return False
 
  if any(word in m for word in small_talk):
@@ -75,7 +77,22 @@ def should_create_task(message):
 
  return True
 
-# -------- EXISTING LOGIC (UNCHANGED) --------
+# ---------- LAYER 3 (NEW FIX) ----------
+
+def is_followup(msg):
+ m = msg.lower()
+ keywords = ["still", "again", "not received", "not working", "same issue"]
+ return any(k in m for k in keywords)
+
+def get_last_active_task(user):
+ cur.execute("""
+ SELECT id FROM tasks
+ WHERE user_number=%s AND status='Active'
+ ORDER BY id DESC LIMIT 1
+ """, (user,))
+ return cur.fetchone()
+
+# ---------- EXISTING ----------
 
 def get_icon(message, intent):
  m = message.lower()
@@ -98,21 +115,14 @@ You are a smart hotel operations assistant.
 Understand the guest request and return structured JSON.
 
 Rules:
-- AC, hot, cold, temperature → intent = maintenance, priority = high
-- cleaning, towel, bedsheet → housekeeping, priority = medium
-- water, food → service, priority = medium
-- complaints → high priority
-
-Also generate a natural human-like reply.
+- AC, hot, cold, temperature → maintenance (high)
+- cleaning, towel → housekeeping (medium)
+- water, food → service (medium)
 
 Message: "{message}"
 
 Return ONLY JSON:
-{{
-  "intent": "maintenance|housekeeping|service|general",
-  "priority": "low|medium|high",
-  "reply": "natural response"
-}}
+{{"intent":"","priority":"low|medium|high","reply":""}}
 """
  try:
   r = client.chat.completions.create(
@@ -126,8 +136,7 @@ Return ONLY JSON:
 
   return json.loads(content)
 
- except Exception as e:
-  print("AI ERROR:", e)
+ except:
   return {
    "intent": "maintenance",
    "priority": "high",
@@ -145,6 +154,8 @@ def smart_priority(base, emotion):
   if base == "medium": return "high"
   if base == "high": return "urgent"
  return base
+
+# ---------- ROUTES ----------
 
 @app.route("/")
 def home():
@@ -172,7 +183,7 @@ def whatsapp():
  msg = request.values.get('Body', '')
  user = request.values.get('From', '')
 
- # completion logic (unchanged)
+ # ---------- COMPLETION (existing) ----------
  if "done" in msg.lower():
   parts = msg.split()
   task_id = int(parts[1]) if len(parts) > 1 else None
@@ -186,6 +197,32 @@ def whatsapp():
 
   return "<Response><Message>Task completed</Message></Response>"
 
+ # ---------- FOLLOW-UP FIX (NEW CORE LOGIC) ----------
+ if is_followup(msg):
+  last_task = get_last_active_task(user)
+
+  if last_task:
+   task_id = last_task[0]
+
+   # escalate properly
+   cur.execute("""
+   UPDATE tasks SET priority='urgent'
+   WHERE id=%s
+   """, (task_id,))
+   conn.commit()
+
+   # notify staff + manager
+   send_whatsapp(
+    STAFF_NUMBER,
+    f"🚨 TASK #{task_id} ESCALATED\nGuest follow-up: {msg}"
+   )
+
+   for m in MANAGERS:
+    send_whatsapp(m, f"🚨 Task #{task_id} escalated by guest")
+
+   return "<Response><Message>⚠️ We’re really sorry. This has been escalated and will be resolved immediately.</Message></Response>"
+
+ # ---------- NORMAL FLOW ----------
  ai = ai_classify(msg)
 
  intent = ai["intent"]
@@ -202,7 +239,7 @@ def whatsapp():
  else:
   reply = f"{icon} {reply}"
 
- # -------- Layer 2 applied HERE --------
+ # ---------- LAYER 2 ----------
  if should_create_task(msg):
 
   cur.execute("""
