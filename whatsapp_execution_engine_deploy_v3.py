@@ -62,6 +62,19 @@ def send_whatsapp(to, msg):
  except Exception as e:
   print("Twilio error:", e)
 
+# ---------- SMALL TALK (NEW) ----------
+
+def handle_small_talk(msg):
+ m = msg.lower().strip()
+
+ if m in ["hi", "hello", "hey"]:
+  return "Hello! How can I assist you today?"
+
+ if m in ["thanks", "thank you"]:
+  return "You're welcome! Let me know if you need anything."
+
+ return None
+
 # ---------- LAYER 2 ----------
 
 def should_create_task(message):
@@ -78,7 +91,7 @@ def should_create_task(message):
 
  return True
 
-# ---------- LAYER 3 FIX ----------
+# ---------- LAYER 3 ----------
 
 def is_followup(msg):
  m = msg.lower().strip()
@@ -97,7 +110,7 @@ def get_last_active_task(user, intent):
  """, (user, intent))
  return cur.fetchone()
 
-# ---------- EXISTING (UNCHANGED PROMPT) ----------
+# ---------- EXISTING ----------
 
 def get_icon(message, intent):
  m = message.lower()
@@ -187,6 +200,11 @@ def tasks():
 def whatsapp():
  msg = request.values.get('Body', '')
  user = request.values.get('From', '')
+
+ # -------- SMALL TALK FIRST (ONLY ADDITION) --------
+ small_reply = handle_small_talk(msg)
+ if small_reply:
+  return f"<Response><Message>📌 {small_reply}</Message></Response>"
 
  ai = ai_classify(msg)
 
