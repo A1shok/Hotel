@@ -42,9 +42,17 @@ def send_whatsapp(to, msg):
     except Exception as e:
         print("Twilio error:", e)
 
+def get_active_task_by_intent(user, intent):
+    cur.execute("""
+    SELECT id FROM tasks
+    WHERE user_number=%s AND intent=%s AND status='Active'
+    ORDER BY id DESC LIMIT 1
+    """, (user, intent))
+    return cur.fetchone()
+
 def get_latest_active_task(user):
     cur.execute("""
-    SELECT id, priority FROM tasks
+    SELECT id, intent FROM tasks
     WHERE user_number=%s AND status='Active'
     ORDER BY id DESC LIMIT 1
     """, (user,))
@@ -55,27 +63,44 @@ def get_latest_active_task(user):
 def classify_message_type(msg):
     m = msg.lower().strip()
 
-    # GREETING
     if m in ["hi", "hello", "hey", "good morning", "good evening", "hi bro"]:
         return "greeting"
 
-    # FOLLOW-UP
     if any(x in m for x in ["still", "where", "how long", "not received", "waiting"]):
         return "followup"
 
-    # QUERY
     if any(x in m for x in ["what", "where", "when", "wifi", "timing", "?"]):
         return "query"
 
-    # TASK
     if any(x in m for x in ["need", "send", "bring", "not working", "clean"]):
         return "task"
 
-    # NOISE
     if m in ["ok", "okay", "thanks", "hmm"]:
         return "noise"
 
     return "unknown"
+
+# ---------- HUMAN RESPONSE LAYER ----------
+
+def build_human_reply(intent, message):
+    m = message.lower()
+
+    if "towel" in m:
+        return "Got it 👍 Sending fresh towels to your room now."
+
+    if "water" in m:
+        return "Sure 👍 Drinking water is being sent to your room."
+
+    if "soap" in m:
+        return "Got it 👍 Soap will be delivered to your room shortly."
+
+    if "ac" in m or "not working" in m:
+        return "Got it 👍 Our maintenance team is on the way to fix this."
+
+    if "clean" in m:
+        return "Housekeeping is on the way 👍 Your room will be cleaned shortly."
+
+    return "Got it 👍 We're taking care of your request."
 
 # ---------- AI ----------
 
@@ -83,28 +108,23 @@ def ai_classify(message):
     prompt = f"""
 You are a hotel operations AI.
 
-Classify the guest request and generate a reply.
+Classify the guest request.
 
 Rules:
-- AC / temperature → maintenance (high)
-- cleaning / towels → housekeeping (medium)
-- food / water → service (medium)
+- AC → maintenance
+- cleaning/towels → housekeeping
+- water/food → service
 
 Message: "{message}"
 
 Return JSON:
-{{
- "intent": "maintenance|housekeeping|service|general",
- "priority": "low|medium|high",
- "reply": "natural human-like reply"
-}}
+{{"intent":"","priority":"low|medium|high"}}
 """
     try:
         r = client.chat.completions.create(
             model="gpt-4.1-mini",
             messages=[{"role": "user", "content": prompt}]
         )
-
         content = r.choices[0].message.content.strip()
 
         if content.startswith("```"):
@@ -112,13 +132,8 @@ Return JSON:
 
         return json.loads(content)
 
-    except Exception as e:
-        print("AI ERROR:", e)
-        return {
-            "intent": "general",
-            "priority": "low",
-            "reply": "We are handling your request."
-        }
+    except:
+        return {"intent": "general", "priority": "low"}
 
 # ---------- ROUTES ----------
 
@@ -149,9 +164,7 @@ def whatsapp():
     msg = request.values.get('Body', '')
     user = request.values.get('From', '')
 
-    clean_msg = msg.strip()
-
-    if not clean_msg:
+    if not msg.strip():
         return "<Response><Message>Could you please tell me what you need?</Message></Response>"
 
     msg_type = classify_message_type(msg)
@@ -160,20 +173,13 @@ def whatsapp():
     if any(x in msg.lower() for x in ["done", "completed", "finished", "fixed"]):
         task = get_latest_active_task(user)
 
-        if not task:
-            return "<Response><Message>No active task found</Message></Response>"
+        if task:
+            cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task[0],))
+            conn.commit()
 
-        task_id = task[0]
+            send_whatsapp(user, "Your request has been completed 👍 Let me know if you need anything else.")
 
-        cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task_id,))
-        conn.commit()
-
-        send_whatsapp(
-            user,
-            "Your request has been completed. Please let us know if you need anything else."
-        )
-
-        return "<Response><Message>Marked as completed 👍</Message></Response>"
+        return "<Response><Message>Done 👍</Message></Response>"
 
     # ---------- GREETING ----------
     if msg_type == "greeting":
@@ -181,30 +187,30 @@ def whatsapp():
 
     # ---------- QUERY ----------
     if msg_type == "query":
-        ai = ai_classify(msg)
-        return f"<Response><Message>{ai['reply']}</Message></Response>"
+        return "<Response><Message>Let me check that for you.</Message></Response>"
 
     # ---------- FOLLOW-UP ----------
     if msg_type == "followup":
         task = get_latest_active_task(user)
 
         if task:
-            send_whatsapp(STAFF_NUMBER, "🚨 Guest asking for update")
+            send_whatsapp(STAFF_NUMBER, "🚨 Guest asked for update")
             return "<Response><Message>We're checking on this and will update you shortly.</Message></Response>"
 
-        return "<Response><Message>I couldn't find an active request. Please tell me what you need.</Message></Response>"
+        return "<Response><Message>I couldn't find any active request. Please tell me what you need.</Message></Response>"
 
     # ---------- TASK ----------
     if msg_type == "task":
-        task = get_latest_active_task(user)
+        ai = ai_classify(msg)
+        intent = ai["intent"]
 
-        if not task:
-            ai = ai_classify(msg)
+        existing = get_active_task_by_intent(user, intent)
 
+        if not existing:
             cur.execute("""
             INSERT INTO tasks(message,intent,priority,status,created_at,user_number)
             VALUES(%s,%s,%s,%s,%s,%s)
-            """, (msg, ai["intent"], ai["priority"], "Active", datetime.utcnow(), user))
+            """, (msg, intent, ai["priority"], "Active", datetime.utcnow(), user))
             conn.commit()
 
             send_whatsapp(
@@ -212,10 +218,11 @@ def whatsapp():
                 f"New task:\n{msg}\nPriority: {ai['priority'].upper()}"
             )
 
-            return f"<Response><Message>{ai['reply']}</Message></Response>"
+            reply = build_human_reply(intent, msg)
+            return f"<Response><Message>{reply}</Message></Response>"
 
         else:
-            return "<Response><Message>We're already working on your request.</Message></Response>"
+            return "<Response><Message>We're already working on this 👍</Message></Response>"
 
     # ---------- NOISE ----------
     if msg_type == "noise":
