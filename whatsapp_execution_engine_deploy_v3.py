@@ -50,53 +50,34 @@ def get_latest_active_task(user):
     """, (user,))
     return cur.fetchone()
 
-# ---------- SMALL TALK ----------
+# ---------- MESSAGE TYPE ENGINE ----------
 
-def handle_small_talk(msg):
+def classify_message_type(msg):
     m = msg.lower().strip()
 
-    if m in ["hi", "hello", "hey"]:
-        return "Hello! How can I assist you today?"
+    # GREETING
+    if m in ["hi", "hello", "hey", "good morning", "good evening", "hi bro"]:
+        return "greeting"
 
-    if m in ["thanks", "thank you"]:
-        return "You're welcome! Let me know if you need anything."
+    # FOLLOW-UP
+    if any(x in m for x in ["still", "where", "how long", "not received", "waiting"]):
+        return "followup"
 
-    return None
+    # QUERY
+    if any(x in m for x in ["what", "where", "when", "wifi", "timing", "?"]):
+        return "query"
 
-# ---------- INTENT CONTROL ----------
+    # TASK
+    if any(x in m for x in ["need", "send", "bring", "not working", "clean"]):
+        return "task"
 
-def should_create_task(message):
-    m = message.lower().strip()
+    # NOISE
+    if m in ["ok", "okay", "thanks", "hmm"]:
+        return "noise"
 
-    if m in ["hi", "hello", "hey", "thanks", "thank you", "ok", "okay"]:
-        return False
+    return "unknown"
 
-    if "thank" in m and "fix" in m:
-        return False
-
-    return True
-
-def is_followup(msg):
-    m = msg.lower()
-    return any(x in m for x in ["still", "again", "not received"]) and len(m.split()) <= 6
-
-def is_resolution(msg):
-    m = msg.lower()
-
-    if "not fixed" in m or "not working" in m:
-        return False
-
-    return any(x in m for x in ["fixed", "resolved", "working now", "done"])
-
-def is_angry(msg):
-    m = msg.lower()
-    return any(x in m for x in ["worst", "bad", "angry", "not fixed"])
-
-def is_staff_done(msg):
-    m = msg.lower()
-    return any(x in m for x in ["done", "completed", "finished", "fixed", "resolved"])
-
-# ---------- AI (RESTORED PROMPT) ----------
+# ---------- AI ----------
 
 def ai_classify(message):
     prompt = f"""
@@ -134,8 +115,8 @@ Return JSON:
     except Exception as e:
         print("AI ERROR:", e)
         return {
-            "intent": "maintenance",
-            "priority": "high",
+            "intent": "general",
+            "priority": "low",
             "reply": "We are handling your request."
         }
 
@@ -170,12 +151,13 @@ def whatsapp():
 
     clean_msg = msg.strip()
 
-    # empty guard
-    if not clean_msg or clean_msg in ['"', "'"]:
+    if not clean_msg:
         return "<Response><Message>Could you please tell me what you need?</Message></Response>"
 
+    msg_type = classify_message_type(msg)
+
     # ---------- STAFF COMPLETION ----------
-    if is_staff_done(msg):
+    if any(x in msg.lower() for x in ["done", "completed", "finished", "fixed"]):
         task = get_latest_active_task(user)
 
         if not task:
@@ -193,75 +175,54 @@ def whatsapp():
 
         return "<Response><Message>Marked as completed 👍</Message></Response>"
 
-    # ---------- SMALL TALK ----------
-    small = handle_small_talk(msg)
-    if small:
-        return f"<Response><Message>{small}</Message></Response>"
+    # ---------- GREETING ----------
+    if msg_type == "greeting":
+        return "<Response><Message>Hi 👋 How can I help you?</Message></Response>"
 
-    ai = ai_classify(msg)
-    intent = ai["intent"]
-    priority = ai["priority"]
-    reply = ai["reply"]
-
-    # ---------- ANGRY ----------
-    if is_angry(msg):
-        task = get_latest_active_task(user)
-        if task:
-            send_whatsapp(STAFF_NUMBER, "🚨 Guest is frustrated - urgent attention needed")
-            return "<Response><Message>I’m really sorry about this. I’ve escalated it and we’re prioritizing it immediately.</Message></Response>"
-
-    # ---------- RESOLUTION ----------
-    if is_resolution(msg):
-        task = get_latest_active_task(user)
-
-        if not task:
-            return "<Response><Message>I couldn't find an active request. Please tell me what you need.</Message></Response>"
-
-        task_id = task[0]
-
-        cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task_id,))
-        conn.commit()
-
-        send_whatsapp(STAFF_NUMBER, "👤 Guest confirmed issue is resolved")
-
-        return "<Response><Message>Great, glad everything is sorted out! Let me know if you need anything else.</Message></Response>"
+    # ---------- QUERY ----------
+    if msg_type == "query":
+        ai = ai_classify(msg)
+        return f"<Response><Message>{ai['reply']}</Message></Response>"
 
     # ---------- FOLLOW-UP ----------
-    if is_followup(msg):
+    if msg_type == "followup":
+        task = get_latest_active_task(user)
+
+        if task:
+            send_whatsapp(STAFF_NUMBER, "🚨 Guest asking for update")
+            return "<Response><Message>We're checking on this and will update you shortly.</Message></Response>"
+
+        return "<Response><Message>I couldn't find an active request. Please tell me what you need.</Message></Response>"
+
+    # ---------- TASK ----------
+    if msg_type == "task":
         task = get_latest_active_task(user)
 
         if not task:
-            return "<Response><Message>I couldn't find an active request. Please tell me what you need.</Message></Response>"
+            ai = ai_classify(msg)
 
-        task_id, current = task
+            cur.execute("""
+            INSERT INTO tasks(message,intent,priority,status,created_at,user_number)
+            VALUES(%s,%s,%s,%s,%s,%s)
+            """, (msg, ai["intent"], ai["priority"], "Active", datetime.utcnow(), user))
+            conn.commit()
 
-        if current == "urgent":
-            return "<Response><Message>I've already escalated this. The team is on it.</Message></Response>"
+            send_whatsapp(
+                STAFF_NUMBER,
+                f"New task:\n{msg}\nPriority: {ai['priority'].upper()}"
+            )
 
-        cur.execute("UPDATE tasks SET priority='urgent' WHERE id=%s", (task_id,))
-        conn.commit()
+            return f"<Response><Message>{ai['reply']}</Message></Response>"
 
-        send_whatsapp(STAFF_NUMBER, "🚨 Task escalated by guest")
+        else:
+            return "<Response><Message>We're already working on your request.</Message></Response>"
 
-        return "<Response><Message>Sorry about that, I've escalated this and it will be handled right away.</Message></Response>"
+    # ---------- NOISE ----------
+    if msg_type == "noise":
+        return "<Response><Message>👍</Message></Response>"
 
-    # ---------- NEW TASK ----------
-    task = get_latest_active_task(user)
-
-    if should_create_task(msg) and not task:
-
-        cur.execute("""
-        INSERT INTO tasks(message,intent,priority,status,created_at,user_number)
-        VALUES(%s,%s,%s,%s,%s,%s)
-        """, (msg, intent, priority, "Active", datetime.utcnow(), user))
-        conn.commit()
-
-        send_whatsapp(
-            STAFF_NUMBER,
-            f"New task:\n{msg}\nPriority: {priority.upper()}"
-        )
-
-    return f"<Response><Message>{reply}</Message></Response>"
+    # ---------- UNKNOWN ----------
+    return "<Response><Message>Could you please clarify your request?</Message></Response>"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
