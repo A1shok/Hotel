@@ -44,11 +44,6 @@ MANAGERS = [
 
 # ---------- HELPERS ----------
 
-def to_ist(dt):
- if dt.tzinfo is None:
-  dt = pytz.utc.localize(dt)
- return dt.astimezone(IST)
-
 def send_whatsapp(to, msg):
  try:
   Client(
@@ -62,7 +57,15 @@ def send_whatsapp(to, msg):
  except Exception as e:
   print("Twilio error:", e)
 
-# ---------- SMALL TALK (NEW) ----------
+def get_latest_active_task(user):
+ cur.execute("""
+ SELECT id, priority FROM tasks
+ WHERE user_number=%s AND status='Active'
+ ORDER BY created_at DESC LIMIT 1
+ """, (user,))
+ return cur.fetchone()
+
+# ---------- SMALL TALK ----------
 
 def handle_small_talk(msg):
  m = msg.lower().strip()
@@ -80,13 +83,10 @@ def handle_small_talk(msg):
 def should_create_task(message):
  m = message.lower().strip()
 
- greetings = ["hi", "hello", "hey"]
- small_talk = ["thanks", "thank you", "ok", "okay"]
-
- if m.startswith(tuple(greetings)):
+ if m.startswith(("hi", "hello", "hey")):
   return False
 
- if any(word in m for word in small_talk):
+ if any(x in m for x in ["thanks", "thank you", "ok", "okay"]):
   return False
 
  return True
@@ -94,23 +94,14 @@ def should_create_task(message):
 # ---------- LAYER 3 ----------
 
 def is_followup(msg):
- m = msg.lower().strip()
- follow_words = ["still", "again", "not received", "same issue"]
- return any(w in m for w in follow_words) and len(m.split()) <= 6
+ m = msg.lower()
+ return any(x in m for x in ["still", "again", "not received"]) and len(m.split()) <= 6
 
 def is_resolution(msg):
  m = msg.lower()
- return any(w in m for w in ["fixed", "resolved", "working now"])
+ return any(x in m for x in ["fixed", "resolved", "working now"])
 
-def get_last_active_task(user, intent):
- cur.execute("""
- SELECT id, priority FROM tasks
- WHERE user_number=%s AND status='Active' AND intent=%s
- ORDER BY id DESC LIMIT 1
- """, (user, intent))
- return cur.fetchone()
-
-# ---------- EXISTING ----------
+# ---------- AI ----------
 
 def get_icon(message, intent):
  m = message.lower()
@@ -121,7 +112,7 @@ def get_icon(message, intent):
   return "🚰"
  if "food" in m:
   return "🍽️"
- if "ac" in m or "temperature" in m:
+ if "ac" in m:
   return "🔧"
 
  return ICON_MAP.get(intent, "📌")
@@ -147,33 +138,11 @@ Return ONLY JSON:
    model="gpt-4.1-mini",
    messages=[{"role": "user", "content": prompt}]
   )
-  content = r.choices[0].message.content.strip()
-
-  if content.startswith("```"):
-   content = content.split("```")[1]
-
-  return json.loads(content)
-
+  return json.loads(r.choices[0].message.content)
  except:
-  return {
-   "intent": "maintenance",
-   "priority": "high",
-   "reply": "We are handling your request."
-  }
+  return {"intent":"maintenance","priority":"high","reply":"We are handling your request."}
 
-def detect_emotion(msg):
- m = msg.lower()
- if msg.isupper() or any(x in m for x in ["still","again","worst","bad","angry"]):
-  return "frustrated"
- return "normal"
-
-def smart_priority(base, emotion):
- if emotion == "frustrated":
-  if base == "medium": return "high"
-  if base == "high": return "urgent"
- return base
-
-# ---------- ROUTES ----------
+# ---------- UI ROUTES (ADDED ONLY) ----------
 
 @app.route("/")
 def home():
@@ -190,55 +159,54 @@ def tasks():
    "id": r[0],
    "message": r[1],
    "priority": r[3],
-   "status": r[4],
-   "time": to_ist(r[5]).strftime("%H:%M:%S")
+   "status": r[4]
   })
 
  return jsonify(data)
+
+# ---------- WHATSAPP ----------
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
  msg = request.values.get('Body', '')
  user = request.values.get('From', '')
 
- # -------- SMALL TALK FIRST (ONLY ADDITION) --------
- small_reply = handle_small_talk(msg)
- if small_reply:
-  return f"<Response><Message>📌 {small_reply}</Message></Response>"
+ # SMALL TALK
+ small = handle_small_talk(msg)
+ if small:
+  return f"<Response><Message>📌 {small}</Message></Response>"
 
  ai = ai_classify(msg)
-
  intent = ai["intent"]
- base_priority = ai["priority"]
+ priority = ai["priority"]
  reply = ai["reply"]
-
- emotion = detect_emotion(msg)
- priority = smart_priority(base_priority, emotion)
 
  icon = get_icon(msg, intent)
 
  # ---------- RESOLUTION ----------
  if is_resolution(msg):
-  last_task = get_last_active_task(user, intent)
-  if last_task:
-   task_id = last_task[0]
+  task = get_latest_active_task(user)
+  if task:
+   task_id = task[0]
 
    cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task_id,))
    conn.commit()
 
+   send_whatsapp(STAFF_NUMBER, f"✅ TASK #{task_id} COMPLETED by guest")
+
    for m in MANAGERS:
-    send_whatsapp(m, f"✅ Task #{task_id} completed by guest")
+    send_whatsapp(m, f"✅ Task #{task_id} completed")
 
    return "<Response><Message>✅ Glad to hear it's resolved.</Message></Response>"
 
  # ---------- FOLLOW-UP ----------
  if is_followup(msg):
-  last_task = get_last_active_task(user, intent)
+  task = get_latest_active_task(user)
 
-  if last_task:
-   task_id, current_priority = last_task
+  if task:
+   task_id, current = task
 
-   if current_priority == "urgent":
+   if current == "urgent":
     return "<Response><Message>⚠️ Already escalated.</Message></Response>"
 
    cur.execute("UPDATE tasks SET priority='urgent' WHERE id=%s", (task_id,))
@@ -246,12 +214,9 @@ def whatsapp():
 
    send_whatsapp(STAFF_NUMBER, f"🚨 TASK #{task_id} ESCALATED")
 
-   for m in MANAGERS:
-    send_whatsapp(m, f"🚨 Task #{task_id} escalated")
-
    return "<Response><Message>⚠️ Escalated immediately.</Message></Response>"
 
- # ---------- NORMAL ----------
+ # ---------- NEW TASK ----------
  if should_create_task(msg):
 
   cur.execute("""
@@ -268,12 +233,7 @@ def whatsapp():
    f"{icon} TASK #{task_id}\n{msg}\nPriority: {priority.upper()}"
   )
 
- if emotion == "frustrated":
-  reply = f"{icon} We understand your frustration."
- else:
-  reply = f"{icon} {reply}"
-
- return f"<Response><Message>{reply}</Message></Response>"
+ return f"<Response><Message>{icon} {reply}</Message></Response>"
 
 if __name__ == "__main__":
- app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+ app.run(host="0.0.0.0", port=5000)
