@@ -97,9 +97,10 @@ def is_followup(msg):
  m = msg.lower()
  return any(x in m for x in ["still", "again", "not received"]) and len(m.split()) <= 6
 
+# 🔥 UPDATED (handles typos like fixex, fixd etc)
 def is_resolution(msg):
  m = msg.lower()
- return any(x in m for x in ["fixed", "resolved", "working now"])
+ return any(x in m for x in ["fix", "resolv", "working now"])
 
 # ---------- AI ----------
 
@@ -142,7 +143,7 @@ Return ONLY JSON:
  except:
   return {"intent":"maintenance","priority":"high","reply":"We are handling your request."}
 
-# ---------- UI ROUTES (ADDED ONLY) ----------
+# ---------- UI ROUTES ----------
 
 @app.route("/")
 def home():
@@ -171,7 +172,21 @@ def whatsapp():
  msg = request.values.get('Body', '')
  user = request.values.get('From', '')
 
- # SMALL TALK
+ # ---------- STAFF COMMAND FIX ----------
+ if msg.lower().startswith("done"):
+  parts = msg.split()
+
+  if len(parts) > 1 and parts[1].isdigit():
+   task_id = int(parts[1])
+
+   cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task_id,))
+   conn.commit()
+
+   return "<Response><Message>✅ Task marked completed</Message></Response>"
+
+  return "<Response><Message>⚠️ Use: done <task_id></Message></Response>"
+
+ # ---------- SMALL TALK ----------
  small = handle_small_talk(msg)
  if small:
   return f"<Response><Message>📌 {small}</Message></Response>"
@@ -192,7 +207,8 @@ def whatsapp():
    cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task_id,))
    conn.commit()
 
-   send_whatsapp(STAFF_NUMBER, f"✅ TASK #{task_id} COMPLETED by guest")
+   # 🔥 UPDATED MESSAGE (clearer)
+   send_whatsapp(STAFF_NUMBER, f"👤 Guest resolved TASK #{task_id}")
 
    for m in MANAGERS:
     send_whatsapp(m, f"✅ Task #{task_id} completed")
