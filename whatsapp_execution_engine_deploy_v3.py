@@ -43,11 +43,12 @@ def send_whatsapp(to, msg):
  except Exception as e:
   print("Twilio error:", e)
 
+# 🔥 FIXED: safer fetch
 def get_latest_active_task(user):
  cur.execute("""
- SELECT id FROM tasks
+ SELECT id, priority FROM tasks
  WHERE user_number=%s AND status='Active'
- ORDER BY created_at DESC LIMIT 1
+ ORDER BY id DESC LIMIT 1
  """, (user,))
  return cur.fetchone()
 
@@ -64,15 +65,11 @@ def handle_small_talk(msg):
 
  return None
 
-# ---------- LAYER 2 ----------
-
+# 🔥 FIXED: do not block real requests
 def should_create_task(message):
  m = message.lower().strip()
 
- if m.startswith(("hi", "hello", "hey")):
-  return False
-
- if any(x in m for x in ["thanks", "thank you", "ok", "okay"]):
+ if m in ["hi", "hello", "hey", "thanks", "thank you", "ok", "okay"]:
   return False
 
  return True
@@ -85,7 +82,11 @@ def is_followup(msg):
 
 def is_resolution(msg):
  m = msg.lower()
- return any(x in m for x in ["fix", "resolv", "working now"])
+
+ if "not fixed" in m or "not working" in m:
+  return False
+
+ return any(x in m for x in ["fixed", "resolved", "working now"])
 
 # ---------- AI ----------
 
@@ -136,7 +137,11 @@ def whatsapp():
  msg = request.values.get('Body', '')
  user = request.values.get('From', '')
 
- # ---------- STAFF DONE ----------
+ # 🔥 FIXED: empty message guard
+ if not msg.strip():
+  return "<Response><Message>Could you please tell me what you need?</Message></Response>"
+
+ # 🔥 FIXED: done command reliability
  if msg.lower().startswith("done"):
   parts = msg.split()
 
@@ -146,13 +151,18 @@ def whatsapp():
    cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task_id,))
    conn.commit()
 
-   send_whatsapp(STAFF_NUMBER, "✅ Task marked as completed")
+   # verify update
+   cur.execute("SELECT status FROM tasks WHERE id=%s", (task_id,))
+   result = cur.fetchone()
 
-   return "<Response><Message>Done noted 👍</Message></Response>"
+   if result and result[0] == "Completed":
+    return "<Response><Message>Done 👍</Message></Response>"
+
+   return "<Response><Message>Could not update task</Message></Response>"
 
   return "<Response><Message>Use: done <task_id></Message></Response>"
 
- # ---------- SMALL TALK ----------
+ # SMALL TALK
  small = handle_small_talk(msg)
  if small:
   return f"<Response><Message>{small}</Message></Response>"
@@ -165,29 +175,39 @@ def whatsapp():
  # ---------- RESOLUTION ----------
  if is_resolution(msg):
   task = get_latest_active_task(user)
-  if task:
-   task_id = task[0]
 
-   cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task_id,))
-   conn.commit()
+  # 🔥 FIXED: no active task guard
+  if not task:
+   return "<Response><Message>I couldn't find an active request. Please tell me what you need.</Message></Response>"
 
-   send_whatsapp(STAFF_NUMBER, "👤 Guest confirmed issue is resolved")
+  task_id = task[0]
 
-   return "<Response><Message>Great, glad everything is sorted out! Let me know if you need anything else.</Message></Response>"
+  cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task_id,))
+  conn.commit()
+
+  send_whatsapp(STAFF_NUMBER, "👤 Guest confirmed issue is resolved")
+
+  return "<Response><Message>Great, glad everything is sorted out! Let me know if you need anything else.</Message></Response>"
 
  # ---------- FOLLOW-UP ----------
  if is_followup(msg):
   task = get_latest_active_task(user)
 
-  if task:
-   task_id = task[0]
+  # 🔥 FIXED: no active task guard
+  if not task:
+   return "<Response><Message>I couldn't find an active request. Please tell me what you need.</Message></Response>"
 
-   cur.execute("UPDATE tasks SET priority='urgent' WHERE id=%s", (task_id,))
-   conn.commit()
+  task_id, current = task
 
-   send_whatsapp(STAFF_NUMBER, "🚨 Task escalated by guest")
+  if current == "urgent":
+   return "<Response><Message>I've already escalated this. The team is on it.</Message></Response>"
 
-   return "<Response><Message>Sorry about that, I've escalated this and it will be handled right away.</Message></Response>"
+  cur.execute("UPDATE tasks SET priority='urgent' WHERE id=%s", (task_id,))
+  conn.commit()
+
+  send_whatsapp(STAFF_NUMBER, "🚨 Task escalated by guest")
+
+  return "<Response><Message>Sorry about that, I've escalated this and it will be handled right away.</Message></Response>"
 
  # ---------- NEW TASK ----------
  if should_create_task(msg):
