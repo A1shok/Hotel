@@ -25,11 +25,6 @@ CREATE TABLE IF NOT EXISTS tasks (
 """)
 conn.commit()
 
-# 🔥 TEMP RESET (RUN ONCE THEN DELETE THIS BLOCK)
-cur.execute("UPDATE tasks SET status='Completed'")
-conn.commit()
-print("All tasks reset")
-
 STAFF_NUMBER = "whatsapp:+916303484136"
 
 # ---------- HELPERS ----------
