@@ -25,6 +25,11 @@ CREATE TABLE IF NOT EXISTS tasks (
 """)
 conn.commit()
 
+# 🔥 TEMP RESET (RUN ONCE THEN DELETE THIS BLOCK)
+cur.execute("UPDATE tasks SET status='Completed'")
+conn.commit()
+print("All tasks reset")
+
 STAFF_NUMBER = "whatsapp:+916303484136"
 
 # ---------- HELPERS ----------
@@ -204,7 +209,7 @@ def whatsapp():
         ai = ai_classify(msg)
         intent = ai["intent"]
 
-        # 🔥 FIX 1: FORCE INTENT CORRECTION
+        # 🔥 intent correction
         m = msg.lower()
         if "ac" in m:
             intent = "maintenance"
@@ -215,9 +220,7 @@ def whatsapp():
 
         existing = get_active_task_by_intent(user, intent)
 
-        # 🔥 FIX 2: FIRST TASK ALWAYS CREATED
         if existing is None:
-
             cur.execute("""
             INSERT INTO tasks(message,intent,priority,status,created_at,user_number)
             VALUES(%s,%s,%s,%s,%s,%s)
