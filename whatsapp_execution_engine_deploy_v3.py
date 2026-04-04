@@ -80,7 +80,7 @@ def classify_message_type(msg):
 
     return "unknown"
 
-# ---------- HUMAN RESPONSE LAYER ----------
+# ---------- HUMAN RESPONSE ----------
 
 def build_human_reply(intent, message):
     m = message.lower()
@@ -92,13 +92,13 @@ def build_human_reply(intent, message):
         return "Sure 👍 Drinking water is being sent to your room."
 
     if "soap" in m:
-        return "Got it 👍 Soap will be delivered to your room shortly."
+        return "Got it 👍 Soap will be delivered shortly."
 
     if "ac" in m or "not working" in m:
-        return "Got it 👍 Our maintenance team is on the way to fix this."
+        return "Got it 👍 Our maintenance team is on the way."
 
     if "clean" in m:
-        return "Housekeeping is on the way 👍 Your room will be cleaned shortly."
+        return "Housekeeping is on the way 👍"
 
     return "Got it 👍 We're taking care of your request."
 
@@ -177,7 +177,7 @@ def whatsapp():
             cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task[0],))
             conn.commit()
 
-            send_whatsapp(user, "Your request has been completed 👍 Let me know if you need anything else.")
+            send_whatsapp(user, "Your request has been completed 👍")
 
         return "<Response><Message>Done 👍</Message></Response>"
 
@@ -197,16 +197,27 @@ def whatsapp():
             send_whatsapp(STAFF_NUMBER, "🚨 Guest asked for update")
             return "<Response><Message>We're checking on this and will update you shortly.</Message></Response>"
 
-        return "<Response><Message>I couldn't find any active request. Please tell me what you need.</Message></Response>"
+        return "<Response><Message>I couldn't find any active request.</Message></Response>"
 
     # ---------- TASK ----------
     if msg_type == "task":
         ai = ai_classify(msg)
         intent = ai["intent"]
 
+        # 🔥 FIX 1: FORCE INTENT CORRECTION
+        m = msg.lower()
+        if "ac" in m:
+            intent = "maintenance"
+        elif "towel" in m or "soap" in m:
+            intent = "housekeeping"
+        elif "water" in m:
+            intent = "service"
+
         existing = get_active_task_by_intent(user, intent)
 
-        if not existing:
+        # 🔥 FIX 2: FIRST TASK ALWAYS CREATED
+        if existing is None:
+
             cur.execute("""
             INSERT INTO tasks(message,intent,priority,status,created_at,user_number)
             VALUES(%s,%s,%s,%s,%s,%s)
@@ -222,13 +233,12 @@ def whatsapp():
             return f"<Response><Message>{reply}</Message></Response>"
 
         else:
-            return "<Response><Message>We're already working on this 👍</Message></Response>"
+            return "<Response><Message>Got it 👍 We're already working on this issue.</Message></Response>"
 
     # ---------- NOISE ----------
     if msg_type == "noise":
         return "<Response><Message>👍</Message></Response>"
 
-    # ---------- UNKNOWN ----------
     return "<Response><Message>Could you please clarify your request?</Message></Response>"
 
 if __name__ == "__main__":
