@@ -185,12 +185,30 @@ def tasks():
 
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
-    msg = request.values.get('Body', '')
+    msg = request.values.get('Body', '').strip()
     user = request.values.get('From', '')
 
-    if not msg.strip():
+    if not msg:
         return "<Response><Message>Please tell me how I can help.</Message></Response>"
 
+    # ---------- NOISE ----------
+    if is_noise(msg):
+        return "<Response><Message>👍</Message></Response>"
+
+    # ---------- RESOLUTION ----------
+    if is_resolution(msg):
+        task = get_latest_active_task(user)
+        if task:
+            cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task[0],))
+            conn.commit()
+            send_whatsapp(user, "Glad it's resolved 👍")
+        return "<Response><Message>Great 👍 Happy to help.</Message></Response>"
+
+    # ---------- SINGLE WORD ----------
+    if is_single_word(msg):
+        return "<Response><Message>Could you please tell me more details?</Message></Response>"
+
+    # ---------- AI ----------
     ai = ai_classify(msg)
 
     msg_type = ai["type"]
@@ -199,19 +217,25 @@ def whatsapp():
     create_task = ai["create_task"]
     description = ai["description"]
 
-    reply = build_reply(ai)
+    # ---------- MENU FIX ----------
+    if is_menu_query(msg):
+        msg_type = "query"
+        create_task = False
+        intent = "information"
 
-    # ---------- STAFF COMPLETION ----------
-    if any(x in msg.lower() for x in ["done", "completed", "finished"]):
-        task = get_latest_active_task(user)
+    # ---------- GREETING ----------
+    if msg_type == "greeting":
+        return "<Response><Message>Hi 👋 How can I help you?</Message></Response>"
 
-        if task:
-            cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task[0],))
-            conn.commit()
+    # ---------- FOLLOWUP ----------
+    if msg_type == "followup":
+        send_whatsapp(STAFF_NUMBER, "🚨 Guest asked for update")
+        return "<Response><Message>We're already checking this 👍</Message></Response>"
 
-            send_whatsapp(user, "Your request has been completed 👍")
-
-        return "<Response><Message>Done 👍</Message></Response>"
+    # ---------- DUPLICATE CONTROL ----------
+    existing = get_latest_active_task(user)
+    if create_task and existing and existing[1] == intent:
+        return "<Response><Message>We're already working on this 👍</Message></Response>"
 
     # ---------- CREATE TASK ----------
     if create_task:
@@ -226,9 +250,9 @@ def whatsapp():
             f"New task:\n{description}\nType: {intent}\nPriority: {urgency.upper()}"
         )
 
-    # ---------- FOLLOWUP ----------
-    if msg_type == "followup":
-        send_whatsapp(STAFF_NUMBER, "🚨 Guest asking for update")
+    # ---------- RESPONSE ----------
+    reply = build_reply(ai)
+    return f"<Response><Message>{reply}</Message></Response>"
 
     return f"<Response><Message>{reply}</Message></Response>"
 
