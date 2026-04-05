@@ -50,7 +50,21 @@ def get_latest_active_task(user):
     """, (user,))
     return cur.fetchone()
 
-# ---------- SUPER AI ----------
+# ---------- GUARDRAILS ----------
+
+def is_noise(msg):
+    return msg.lower().strip() in ["ok", "okay", "thanks", "hmm", "👍"]
+
+def is_resolution(msg):
+    return any(x in msg.lower() for x in ["fixed", "fixex", "resolved", "done", "completed"])
+
+def is_single_word(msg):
+    return len(msg.strip().split()) == 1
+
+def is_menu_query(msg):
+    return "menu" in msg.lower()
+
+# ---------- AI ----------
 
 def ai_classify(message):
     prompt = f"""
@@ -139,12 +153,11 @@ def build_reply(ai):
         return "Let me check that for you."
 
     if t == "followup":
-        return "We're checking on this and will update you shortly."
+        return "We're already checking this 👍"
 
     if t == "noise":
         return "👍"
 
-    # TASK replies
     if intent == "housekeeping":
         return "Got it 👍 Housekeeping will handle this shortly."
 
@@ -155,7 +168,7 @@ def build_reply(ai):
         return "Sure 👍 Your request has been sent to the kitchen."
 
     if intent == "complaint":
-        return "We’re really sorry for the inconvenience. This is being handled immediately."
+        return "We’re really sorry. This is being handled immediately."
 
     return "Got it 👍 We're taking care of your request."
 
@@ -163,7 +176,7 @@ def build_reply(ai):
 
 @app.route("/")
 def home():
-    return send_file("manager_dashboard_premium_v3_deploy.html")
+    return send_file("dashboard.html")
 
 @app.route("/tasks")
 def tasks():
@@ -227,10 +240,25 @@ def whatsapp():
     if msg_type == "greeting":
         return "<Response><Message>Hi 👋 How can I help you?</Message></Response>"
 
-    # ---------- FOLLOWUP ----------
+    # ---------- FOLLOWUP (SMART) ----------
     if msg_type == "followup":
-        send_whatsapp(STAFF_NUMBER, "🚨 Guest asked for update")
-        return "<Response><Message>We're already checking this 👍</Message></Response>"
+        task = get_latest_active_task(user)
+
+        if task:
+            task_id, task_intent = task
+
+            cur.execute("UPDATE tasks SET priority='high' WHERE id=%s", (task_id,))
+            conn.commit()
+
+            send_whatsapp(
+                STAFF_NUMBER,
+                f"🚨 FOLLOW-UP on TASK #{task_id} (Guest waiting)"
+            )
+
+            return "<Response><Message>Sorry about that, we're expediting this right now.</Message></Response>"
+
+        else:
+            return "<Response><Message>I couldn't find any active request. Please tell me again.</Message></Response>"
 
     # ---------- DUPLICATE CONTROL ----------
     existing = get_latest_active_task(user)
@@ -252,8 +280,6 @@ def whatsapp():
 
     # ---------- RESPONSE ----------
     reply = build_reply(ai)
-    return f"<Response><Message>{reply}</Message></Response>"
-
     return f"<Response><Message>{reply}</Message></Response>"
 
 # ---------- RUN ----------
