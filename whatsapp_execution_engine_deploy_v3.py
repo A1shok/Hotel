@@ -46,14 +46,30 @@ def send_whatsapp(to, msg):
 
 # ---------- DB HELPERS ----------
 
+def get_active_tasks(user):
+    cur.execute("""
+    SELECT intent, description FROM tasks
+    WHERE user_number=%s AND status='Active'
+    ORDER BY created_at ASC
+    LIMIT 5
+    """, (user,))
+    return cur.fetchall()
+
+def format_tasks_context(tasks):
+    if not tasks:
+        return "No active tasks"
+
+    lines = []
+    for i, (intent, desc) in enumerate(tasks, 1):
+        lines.append(f"{i}. {intent} - {desc}")
+
+    return "\n".join(lines)
+
 def get_task_by_intent(user, intent):
     cur.execute("""
     SELECT id FROM tasks
-    WHERE user_number=%s 
-    AND status='Active'
-    AND intent=%s
-    ORDER BY created_at ASC
-    LIMIT 1
+    WHERE user_number=%s AND status='Active' AND intent=%s
+    ORDER BY created_at ASC LIMIT 1
     """, (user, intent))
     return cur.fetchone()
 
@@ -67,13 +83,20 @@ def get_latest_active(user):
 
 # ---------- AI ----------
 
-def ai_classify(message):
+def ai_classify(message, tasks_context):
     prompt = f"""
 You are a hotel operations AI assistant.
 
-Convert the guest message into STRICT JSON.
+---
 
-OUTPUT FORMAT:
+🧾 ACTIVE TASKS (CONTEXT)
+
+{tasks_context}
+
+---
+
+🎯 OUTPUT FORMAT (STRICT JSON)
+
 {{
 "type": "greeting | task | query | followup | noise",
 "intent": "housekeeping | maintenance | food | complaint | information | unknown",
@@ -86,54 +109,45 @@ OUTPUT FORMAT:
 
 ---
 
-🚨 FOLLOW-UP OVERRIDE RULE (VERY IMPORTANT)
+🧠 DECISION HIERARCHY (STRICT — FOLLOW EXACTLY)
 
-If a message is asking about the status of an existing request
-(e.g. "still not received", "not fixed", "where is it", "any update"):
+1. If message refers to an EXISTING task (delay, not received, not fixed, waiting, where is it):
+   → type = "followup"
+   → create_task = false
+   → MUST set reference_intent using ACTIVE TASKS
 
-- type MUST be "followup"
-- create_task MUST be false
-- DO NOT create a new task
+2. If message confirms completion:
+   → type = "followup"
+   → resolution = true
+   → create_task = false
 
-Even if the message sounds urgent or mentions a problem,
-it is STILL a follow-up, not a new task.
+3. If message requests NEW work:
+   → type = "task"
+   → create_task = true
 
----
+4. If informational:
+   → query
 
-🧠 DECISION PRIORITY
+5. Greeting:
+   → greeting
 
-1. Task
-2. Followup
-3. Query
-4. Greeting
-5. Noise
-
----
-
-🔁 FOLLOW-UP LINKING
-
-If message is followup:
-- Identify WHICH previous request it refers to
-- Set "reference_intent" accordingly
-
-Example:
-"Still not received towels" → housekeeping  
-"AC still not fixed" → maintenance  
-
-If unclear → "unknown"
+6. Else:
+   → noise
 
 ---
 
-🔁 RESOLUTION
+🚨 FOLLOW-UP OVERRIDES TASK
 
-If solved:
-- resolution = true
+Even if message sounds like a problem,
+if it relates to an existing task,
+it MUST be followup — NOT task.
 
 ---
 
-⚠️ OUTPUT RULES
+⚠️ RULES
 
-- ONLY JSON
+- ALWAYS return valid JSON
+- NO extra text
 - ALL fields required
 
 ---
@@ -176,7 +190,7 @@ def validate_ai_output(data, original_msg):
 
     for field in required:
         if field not in data:
-            data[field] = "unknown" if field == "reference_intent" else False
+            data[field] = False if field in ["create_task", "resolution"] else "unknown"
 
     if not data["description"]:
         data["description"] = original_msg
@@ -203,9 +217,12 @@ def whatsapp():
     msg = request.values.get("Body", "").strip()
     user = "whatsapp:+917780210871"
 
-    print("INCOMING:", msg)
+    tasks = get_active_tasks(user)
+    tasks_context = format_tasks_context(tasks)
 
-    ai_data = validate_ai_output(ai_classify(msg), msg)
+    print("TASK CONTEXT:\n", tasks_context)
+
+    ai_data = validate_ai_output(ai_classify(msg, tasks_context), msg)
 
     print("FINAL AI:", ai_data)
 
@@ -220,7 +237,7 @@ def whatsapp():
             send_whatsapp(STAFF_NUMBER, f"✅ TASK #{task[0]} marked completed")
         return "<Response><Message>Great 👍 Happy to help.</Message></Response>"
 
-    # ---------- FOLLOWUP (INTENT BASED) ----------
+    # ---------- FOLLOWUP ----------
     if msg_type == "followup":
         task = None
 
