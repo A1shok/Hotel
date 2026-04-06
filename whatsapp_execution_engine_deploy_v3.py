@@ -78,6 +78,7 @@ RULES:
 - followup → urgency MUST be high
 - greeting + request → MUST be task
 - Prefer task if unsure
+- If guest confirms issue is solved → type MUST be followup, create_task false, description must indicate resolution
 - Output ONLY JSON
 
 Message: "{message}"
@@ -109,7 +110,7 @@ Message: "{message}"
             "description": message
         }
 
-# ---------- VALIDATION (CRITICAL) ----------
+# ---------- VALIDATION ----------
 
 def validate_ai_output(data, original_msg):
     required = ["type", "intent", "urgency", "create_task", "description"]
@@ -157,7 +158,7 @@ def whatsapp():
     if not msg:
         return "<Response><Message>Please tell me how I can help.</Message></Response>"
 
-    # AI
+    # AI + VALIDATION
     ai_data = ai_classify(msg)
     ai_data = validate_ai_output(ai_data, msg)
 
@@ -165,23 +166,34 @@ def whatsapp():
 
     msg_type = ai_data["type"]
 
-    # FOLLOWUP (NO TASK CREATION)
+    # ---------- RESOLUTION HANDLING ----------
+    if msg_type == "followup" and "resolved" in ai_data["description"].lower():
+        task = get_latest_active(user)
+        if task:
+            cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task[0],))
+            conn.commit()
+
+            send_whatsapp(STAFF_NUMBER, f"✅ TASK #{task[0]} marked completed by guest")
+
+        return "<Response><Message>Great 👍 Happy to help.</Message></Response>"
+
+    # ---------- FOLLOWUP ----------
     if msg_type == "followup":
         task = get_latest_active(user)
         if task:
             send_whatsapp(STAFF_NUMBER, f"🚨 FOLLOW-UP on TASK #{task[0]}")
         return "<Response><Message>Sorry about that, we're expediting this.</Message></Response>"
 
-    # GREETING / QUERY / NOISE
+    # ---------- GREETING / QUERY / NOISE ----------
     if msg_type in ["greeting", "query", "noise"]:
         return f"<Response><Message>{build_reply(msg_type)}</Message></Response>"
 
-    # DUPLICATE CHECK (intent-based)
+    # ---------- DUPLICATE ----------
     existing = get_latest_active(user)
     if existing and existing[1] == ai_data["intent"]:
         return "<Response><Message>We're already working on your previous request 👍</Message></Response>"
 
-    # TASK CREATION
+    # ---------- TASK CREATION ----------
     if ai_data["create_task"]:
         cur.execute("""
         INSERT INTO tasks(message,intent,priority,status,created_at,user_number)
