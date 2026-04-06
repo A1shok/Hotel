@@ -151,7 +151,11 @@ def build_reply(msg_type):
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
     msg = request.values.get("Body", "").strip()
-    user = request.values.get("From", "")
+    real_user = request.values.get("From", "")
+    print("REAL NUMBER:", real_user)
+
+    # TEMP OVERRIDE (use your working number)
+    user = "whatsapp:+917780210871"
 
     print("INCOMING:", msg, "| USER:", user)
 
