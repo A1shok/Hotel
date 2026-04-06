@@ -1,6 +1,6 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request
 from flask_cors import CORS
-import os, psycopg2, json, re
+import os, psycopg2, json
 from datetime import datetime
 from openai import OpenAI
 from twilio.rest import Client
@@ -24,13 +24,12 @@ CREATE TABLE IF NOT EXISTS tasks (
  priority TEXT,
  status TEXT,
  created_at TIMESTAMP,
- user_number TEXT,
- assigned_to TEXT
+ user_number TEXT
 )
 """)
 conn.commit()
 
-# ---------- HELPERS ----------
+# ---------- WHATSAPP ----------
 
 def send_whatsapp(to, msg):
     try:
@@ -45,126 +44,106 @@ def send_whatsapp(to, msg):
     except Exception as e:
         print("Twilio error:", e)
 
-def extract_task_id(msg):
-    match = re.search(r"\d+", msg)
-    return int(match.group()) if match else None
-
-def get_task(task_id):
-    cur.execute("SELECT * FROM tasks WHERE id=%s", (task_id,))
-    return cur.fetchone()
+# ---------- DB HELPERS ----------
 
 def get_latest_active(user):
     cur.execute("""
-    SELECT id, intent, priority
-    FROM tasks
+    SELECT id, intent, priority FROM tasks
     WHERE user_number=%s AND status='Active'
     ORDER BY id DESC LIMIT 1
     """, (user,))
     return cur.fetchone()
 
-def create_task(user, description, intent, priority):
-    cur.execute("""
-    INSERT INTO tasks(message,intent,priority,status,created_at,user_number,assigned_to)
-    VALUES(%s,%s,%s,%s,%s,%s,%s)
-    RETURNING id
-    """, (description, intent, priority, "Active", datetime.utcnow(), user, STAFF_NUMBER))
-    task_id = cur.fetchone()[0]
-    conn.commit()
-    return task_id
-
-def complete_task(task_id):
-    cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task_id,))
-    conn.commit()
-
-def escalate_task(task_id):
-    cur.execute("UPDATE tasks SET priority='high' WHERE id=%s", (task_id,))
-    conn.commit()
-
-# ---------- GUARDRAILS ----------
-
-def is_noise(msg):
-    return msg.lower().strip() in ["ok", "okay", "thanks", "hmm", "👍"]
-
-def is_resolution(msg):
-    m = msg.lower()
-    if "not fixed" in m or "still not fixed" in m:
-        return False
-    return any(x in m for x in ["fixed", "fixex", "resolved", "done", "completed"])
-
-def is_followup_text(msg):
-    m = msg.lower()
-    return any(x in m for x in ["still not", "not fixed", "waiting", "where is", "how long"])
-
-def is_single_word_ambiguous(msg):
-    words = msg.strip().split()
-    if len(words) != 1:
-        return False
-    return words[0].lower() in ["ac", "help", "tv", "geyser"]
-
 # ---------- AI ----------
 
 def ai_classify(message):
     prompt = f"""
-Classify hotel message.
+You are a hotel operations AI assistant.
 
-Return JSON:
+Convert the guest message into STRICT JSON.
+
+OUTPUT FORMAT:
 {{
-"type": "greeting|task|query|followup|noise",
-"intent": "housekeeping|maintenance|food|complaint|information|unknown",
-"urgency": "low|medium|high",
+"type": "greeting | task | query | followup | noise",
+"intent": "housekeeping | maintenance | food | complaint | information | unknown",
+"urgency": "low | medium | high",
 "create_task": true/false,
-"description": ""
+"description": "clean summary"
 }}
+
+RULES:
+- If type = task → create_task MUST be true
+- If type != task → create_task MUST be false
+- If message needs action → MUST be task
+- followup → urgency MUST be high
+- greeting + request → MUST be task
+- Prefer task if unsure
+- Output ONLY JSON
 
 Message: "{message}"
 """
+
     try:
         r = client.chat.completions.create(
             model="gpt-4.1-mini",
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
         )
-        return json.loads(r.choices[0].message.content)
-    except:
+
+        content = r.choices[0].message.content.strip()
+
+        if content.startswith("```"):
+            content = content.split("```")[1]
+
+        print("AI RAW:", content)
+
+        return json.loads(content)
+
+    except Exception as e:
+        print("AI ERROR:", e)
         return {
             "type": "task",
             "intent": "unknown",
-            "urgency": "high",
+            "urgency": "medium",
             "create_task": True,
             "description": message
         }
 
+# ---------- VALIDATION (CRITICAL) ----------
+
+def validate_ai_output(data, original_msg):
+    required = ["type", "intent", "urgency", "create_task", "description"]
+
+    for field in required:
+        if field not in data:
+            raise ValueError(f"Missing field: {field}")
+
+    if data["type"] not in ["greeting", "task", "query", "followup", "noise"]:
+        data["type"] = "task"
+
+    if data["urgency"] not in ["low", "medium", "high"]:
+        data["urgency"] = "medium"
+
+    if not isinstance(data["create_task"], bool):
+        data["create_task"] = data["type"] == "task"
+
+    if not data["description"]:
+        data["description"] = original_msg
+
+    return data
+
 # ---------- RESPONSE ----------
 
-def build_reply(intent):
-    if intent == "housekeeping":
-        return "Got it 👍 Housekeeping will handle this shortly."
-    if intent == "maintenance":
-        return "Got it 👍 Our maintenance team is on the way."
-    if intent == "food":
-        return "Sure 👍 Your request has been sent."
-    if intent == "complaint":
-        return "We’re really sorry. This is being handled immediately."
+def build_reply(msg_type):
+    if msg_type == "greeting":
+        return "Hi 👋 How can I help you?"
+    if msg_type == "query":
+        return "Sure 👍 Let me know if you want me to arrange it."
+    if msg_type == "followup":
+        return "Sorry about that, we're checking this."
+    if msg_type == "noise":
+        return "👍"
     return "Got it 👍 We're taking care of your request."
-
-# ---------- STAFF ----------
-
-def handle_staff(msg):
-    if "done" in msg.lower():
-        task_id = extract_task_id(msg)
-
-        if not task_id:
-            return "Send: done <task_id>"
-
-        task = get_task(task_id)
-
-        if task:
-            complete_task(task_id)
-            guest = task[6]
-            send_whatsapp(guest, "Your request has been completed 👍")
-
-        return "Task completed"
-
-    return "Reply: done <task_id>"
 
 # ---------- ROUTE ----------
 
@@ -173,72 +152,61 @@ def whatsapp():
     msg = request.values.get("Body", "").strip()
     user = request.values.get("From", "")
 
+    print("INCOMING:", msg, "| USER:", user)
+
     if not msg:
         return "<Response><Message>Please tell me how I can help.</Message></Response>"
 
-    # STAFF FLOW
-    if user == STAFF_NUMBER:
-        return f"<Response><Message>{handle_staff(msg)}</Message></Response>"
-
-    # NOISE
-    if is_noise(msg):
-        return "<Response><Message>👍</Message></Response>"
-
-    # RESOLUTION
-    if is_resolution(msg):
-        task = get_latest_active(user)
-        if task:
-            complete_task(task[0])
-            send_whatsapp(STAFF_NUMBER, f"Guest resolved task #{task[0]}")
-        return "<Response><Message>Great 👍 Happy to help.</Message></Response>"
-
-    # FOLLOWUP
-    if is_followup_text(msg):
-        task = get_latest_active(user)
-        if task:
-            escalate_task(task[0])
-            send_whatsapp(STAFF_NUMBER, f"🚨 Follow-up on task #{task[0]}")
-        return "<Response><Message>Sorry, we're expediting this.</Message></Response>"
-
-    # SINGLE WORD
-    if is_single_word_ambiguous(msg):
-        return "<Response><Message>Could you please tell me more details?</Message></Response>"
-
     # AI
-    ai = ai_classify(msg)
+    ai_data = ai_classify(msg)
+    ai_data = validate_ai_output(ai_data, msg)
 
-    msg_type = ai["type"]
-    intent = ai["intent"]
-    urgency = ai["urgency"]
-    create = ai["create_task"]
-    desc = ai["description"]
+    print("FINAL AI:", ai_data)
 
-    # GREETING
-    if msg_type == "greeting":
-        return "<Response><Message>Hi 👋 How can I help you?</Message></Response>"
+    msg_type = ai_data["type"]
 
-    # QUERY
-    if msg_type == "query":
-        return "<Response><Message>Yes 👍 I can help with that. Let me know if you'd like me to arrange it.</Message></Response>"
+    # FOLLOWUP (NO TASK CREATION)
+    if msg_type == "followup":
+        task = get_latest_active(user)
+        if task:
+            send_whatsapp(STAFF_NUMBER, f"🚨 FOLLOW-UP on TASK #{task[0]}")
+        return "<Response><Message>Sorry about that, we're expediting this.</Message></Response>"
 
-    # DUPLICATE CONTROL (FIXED)
+    # GREETING / QUERY / NOISE
+    if msg_type in ["greeting", "query", "noise"]:
+        return f"<Response><Message>{build_reply(msg_type)}</Message></Response>"
+
+    # DUPLICATE CHECK (intent-based)
     existing = get_latest_active(user)
-    if existing:
-        if desc.lower().strip() == msg.lower().strip():
-            return "<Response><Message>We're already working on your previous request 👍</Message></Response>"
+    if existing and existing[1] == ai_data["intent"]:
+        return "<Response><Message>We're already working on your previous request 👍</Message></Response>"
 
-    # TASK
-    if create:
-        task_id = create_task(user, desc, intent, urgency)
+    # TASK CREATION
+    if ai_data["create_task"]:
+        cur.execute("""
+        INSERT INTO tasks(message,intent,priority,status,created_at,user_number)
+        VALUES(%s,%s,%s,%s,%s,%s)
+        RETURNING id
+        """, (
+            ai_data["description"],
+            ai_data["intent"],
+            ai_data["urgency"],
+            "Active",
+            datetime.utcnow(),
+            user
+        ))
+
+        task_id = cur.fetchone()[0]
+        conn.commit()
+
+        print("TASK CREATED:", task_id)
 
         send_whatsapp(
             STAFF_NUMBER,
-            f"🆕 TASK #{task_id}\n{desc}\nPriority: {urgency.upper()}"
+            f"🆕 TASK #{task_id}\n{ai_data['description']}"
         )
 
-        return f"<Response><Message>{build_reply(intent)}</Message></Response>"
-
-    return "<Response><Message>Please clarify your request.</Message></Response>"
+    return f"<Response><Message>{build_reply(msg_type)}</Message></Response>"
 
 # ---------- RUN ----------
 
