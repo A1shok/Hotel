@@ -46,20 +46,22 @@ def send_whatsapp(to, msg):
 
 # ---------- DB HELPERS ----------
 
+def get_latest_active(user):
+    cur.execute("""
+    SELECT id, intent, priority FROM tasks
+    WHERE user_number=%s AND status='Active'
+    ORDER BY created_at DESC LIMIT 1
+    """, (user,))
+    return cur.fetchone()
+
 def get_followup_task(user):
     cur.execute("""
     SELECT id, intent, created_at FROM tasks
     WHERE user_number=%s AND status='Active'
     ORDER BY created_at ASC
     """, (user,))
-    
     tasks = cur.fetchall()
-    
-    if not tasks:
-        return None
-
-    # Return oldest active task (most likely pending)
-    return tasks[0]
+    return tasks[0] if tasks else None
 
 # ---------- AI ----------
 
@@ -67,26 +69,91 @@ def ai_classify(message):
     prompt = f"""
 You are a hotel operations AI assistant.
 
-Convert the guest message into STRICT JSON.
+Your job is to convert messy guest messages into structured operational decisions.
+
+---
+
+🧠 MESSAGE TYPES (CHOOSE ONE)
+
+- greeting → conversation start
+- task → requires staff action
+- query → informational question only
+- followup → asking status of an existing request
+- noise → no meaningful action
+
+---
+
+🧾 INTENT
+
+- housekeeping
+- maintenance
+- food
+- complaint
+- information
+- unknown
+
+---
+
+⚡ URGENCY
+
+- high → complaints, not working, still not fixed
+- medium → normal requests
+- low → informational
+
+---
+
+🚨🚨🚨 CRITICAL DECISION RULE (DO NOT VIOLATE) 🚨🚨🚨
+
+If a message describes a problem, request, or issue that requires staff action:
+
+"type" MUST be "task"
+"create_task" MUST be true
+
+This rule OVERRIDES ALL other rules.
+
+DO NOT classify actionable issues as "query" under ANY circumstance.
+
+---
+
+🧠 DECISION PRIORITY (STRICT ORDER)
+
+1. Requires staff action → ALWAYS "task"
+2. Status check → "followup"
+3. Question → "query"
+4. Greeting → "greeting"
+5. Else → "noise"
+
+---
+
+🔁 RESOLUTION
+
+If guest confirms issue is solved:
+- type → followup
+- create_task → false
+- description → must indicate resolution
+
+---
+
+⚠️ OUTPUT RULES
+
+- ONLY JSON
+- NO extra text
+- ALL fields required
+- description MUST NOT be empty
+
+---
 
 OUTPUT FORMAT:
+
 {{
-"type": "greeting | task | query | followup | noise",
-"intent": "housekeeping | maintenance | food | complaint | information | unknown",
-"urgency": "low | medium | high",
+"type": "",
+"intent": "",
+"urgency": "",
 "create_task": true/false,
-"description": "clean summary"
+"description": ""
 }}
 
-RULES:
-- If type = task → create_task MUST be true
-- If type != task → create_task MUST be false
-- If message needs action → MUST be task
-- followup → urgency MUST be high
-- greeting + request → MUST be task
-- Prefer task if unsure
-- If guest confirms issue is solved → type MUST be followup, create_task false, description must indicate resolution
-- Output ONLY JSON
+---
 
 Message: "{message}"
 """
@@ -117,7 +184,7 @@ Message: "{message}"
             "description": message
         }
 
-# ---------- VALIDATION ----------
+# ---------- VALIDATION (NO LOGIC OVERRIDE) ----------
 
 def validate_ai_output(data, original_msg):
     required = ["type", "intent", "urgency", "create_task", "description"]
@@ -158,18 +225,14 @@ def build_reply(msg_type):
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
     msg = request.values.get("Body", "").strip()
-    real_user = request.values.get("From", "")
-    print("REAL NUMBER:", real_user)
-
-    # TEMP OVERRIDE (use your working number)
-    user = "whatsapp:+917780210871"
+    user = request.values.get("From", "")
 
     print("INCOMING:", msg, "| USER:", user)
 
     if not msg:
         return "<Response><Message>Please tell me how I can help.</Message></Response>"
 
-    # AI + VALIDATION
+    # AI
     ai_data = ai_classify(msg)
     ai_data = validate_ai_output(ai_data, msg)
 
@@ -177,34 +240,28 @@ def whatsapp():
 
     msg_type = ai_data["type"]
 
-    # ---------- RESOLUTION HANDLING ----------
+    # ---------- RESOLUTION ----------
     if msg_type == "followup" and "resolved" in ai_data["description"].lower():
-        task = get_followup_task(user)
+        task = get_latest_active(user)
         if task:
             cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task[0],))
             conn.commit()
-
             send_whatsapp(STAFF_NUMBER, f"✅ TASK #{task[0]} marked completed by guest")
 
         return "<Response><Message>Great 👍 Happy to help.</Message></Response>"
 
     # ---------- FOLLOWUP ----------
     if msg_type == "followup":
-        task = get_latest_active(user)
+        task = get_followup_task(user)
         if task:
             send_whatsapp(STAFF_NUMBER, f"🚨 FOLLOW-UP on TASK #{task[0]}")
         return "<Response><Message>Sorry about that, we're expediting this.</Message></Response>"
 
-    # ---------- GREETING / QUERY / NOISE ----------
+    # ---------- NON-TASK ----------
     if msg_type in ["greeting", "query", "noise"]:
         return f"<Response><Message>{build_reply(msg_type)}</Message></Response>"
 
-    # ---------- DUPLICATE ----------
-    existing = get_latest_active(user)
-    if existing and existing[1] == ai_data["intent"]:
-        return "<Response><Message>We're already working on your previous request 👍</Message></Response>"
-
-    # ---------- TASK CREATION ----------
+    # ---------- TASK ----------
     if ai_data["create_task"]:
         cur.execute("""
         INSERT INTO tasks(message,intent,priority,status,created_at,user_number)
