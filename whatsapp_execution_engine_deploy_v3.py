@@ -68,18 +68,49 @@ OUTPUT FORMAT:
 "intent": "housekeeping | maintenance | food | complaint | information | unknown",
 "urgency": "low | medium | high",
 "create_task": true/false,
-"description": "clean summary"
+"description": "clean summary",
+"resolution": true/false
 }}
 
-RULES:
-- If type = task → create_task MUST be true
-- If type != task → create_task MUST be false
-- If message needs action → MUST be task
-- followup → urgency MUST be high
-- greeting + request → MUST be task
-- Prefer task if unsure
-- If guest confirms issue is solved → type MUST be followup, create_task false, description must indicate resolution
-- Output ONLY JSON
+---
+
+🚨 CRITICAL DECISION RULE
+
+If message requires staff action:
+"type" MUST be "task"
+"create_task" MUST be true
+
+---
+
+🧠 DECISION PRIORITY
+
+1. Requires action → task
+2. Status check → followup
+3. Question → query
+4. Greeting → greeting
+5. Else → noise
+
+---
+
+🔁 RESOLUTION RULE
+
+If guest confirms issue is solved:
+- type → followup
+- create_task → false
+- resolution → true
+
+Else:
+- resolution → false
+
+---
+
+⚠️ OUTPUT RULES
+
+- ONLY JSON
+- ALL fields required
+- NO extra text
+
+---
 
 Message: "{message}"
 """
@@ -107,13 +138,14 @@ Message: "{message}"
             "intent": "unknown",
             "urgency": "medium",
             "create_task": True,
-            "description": message
+            "description": message,
+            "resolution": False
         }
 
 # ---------- VALIDATION ----------
 
 def validate_ai_output(data, original_msg):
-    required = ["type", "intent", "urgency", "create_task", "description"]
+    required = ["type", "intent", "urgency", "create_task", "description", "resolution"]
 
     for field in required:
         if field not in data:
@@ -127,6 +159,9 @@ def validate_ai_output(data, original_msg):
 
     if not isinstance(data["create_task"], bool):
         data["create_task"] = data["type"] == "task"
+
+    if not isinstance(data["resolution"], bool):
+        data["resolution"] = False
 
     if not data["description"]:
         data["description"] = original_msg
@@ -154,7 +189,7 @@ def whatsapp():
     real_user = request.values.get("From", "")
     print("REAL NUMBER:", real_user)
 
-    # TEMP OVERRIDE
+    # TEMP override
     user = "whatsapp:+917780210871"
 
     print("INCOMING:", msg, "| USER:", user)
@@ -162,17 +197,16 @@ def whatsapp():
     if not msg:
         return "<Response><Message>Please tell me how I can help.</Message></Response>"
 
-    # AI + VALIDATION
+    # AI + validation
     ai_data = ai_classify(msg)
     ai_data = validate_ai_output(ai_data, msg)
 
     print("FINAL AI:", ai_data)
 
     msg_type = ai_data["type"]
-    desc = ai_data["description"].lower()
 
-    # ---------- RESOLUTION FIX ----------
-    if msg_type == "followup" and any(word in desc for word in ["fixed", "resolved", "done", "completed"]):
+    # ---------- RESOLUTION (CLEAN) ----------
+    if ai_data["resolution"]:
         task = get_latest_active(user)
         if task:
             cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task[0],))
@@ -193,11 +227,7 @@ def whatsapp():
     if msg_type in ["greeting", "query", "noise"]:
         return f"<Response><Message>{build_reply(msg_type)}</Message></Response>"
 
-    # ---------- GARBAGE TASK BLOCK ----------
-    if ai_data["create_task"] and len(ai_data["description"].split()) < 2:
-        return "<Response><Message>Could you please provide more details?</Message></Response>"
-
-    # ---------- TASK CREATION ----------
+    # ---------- TASK ----------
     if ai_data["create_task"]:
         cur.execute("""
         INSERT INTO tasks(message,intent,priority,status,created_at,user_number)
