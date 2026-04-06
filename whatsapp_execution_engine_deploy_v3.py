@@ -86,9 +86,17 @@ OUTPUT FORMAT:
 
 ---
 
-🚨 CRITICAL RULE
+🚨 FOLLOW-UP OVERRIDE RULE (VERY IMPORTANT)
 
-If requires staff action → MUST be task
+If a message is asking about the status of an existing request
+(e.g. "still not received", "not fixed", "where is it", "any update"):
+
+- type MUST be "followup"
+- create_task MUST be false
+- DO NOT create a new task
+
+Even if the message sounds urgent or mentions a problem,
+it is STILL a follow-up, not a new task.
 
 ---
 
