@@ -11,6 +11,10 @@ CORS(app)
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 conn = psycopg2.connect(os.environ.get("DATABASE_URL"))
 cur = conn.cursor()
+# TEMP: CLEAR DB (RUN ONCE, THEN REMOVE)
+cur.execute("TRUNCATE TABLE tasks RESTART IDENTITY;")
+conn.commit()
+print("DB CLEARED")
 
 STAFF_NUMBER = "whatsapp:+916303484136"
 
