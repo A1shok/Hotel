@@ -46,11 +46,22 @@ def send_whatsapp(to, msg):
 
 # ---------- DB HELPERS ----------
 
+def get_task_by_intent(user, intent):
+    cur.execute("""
+    SELECT id FROM tasks
+    WHERE user_number=%s 
+    AND status='Active'
+    AND intent=%s
+    ORDER BY created_at ASC
+    LIMIT 1
+    """, (user, intent))
+    return cur.fetchone()
+
 def get_latest_active(user):
     cur.execute("""
-    SELECT id, intent, priority FROM tasks
+    SELECT id FROM tasks
     WHERE user_number=%s AND status='Active'
-    ORDER BY id DESC LIMIT 1
+    ORDER BY created_at DESC LIMIT 1
     """, (user,))
     return cur.fetchone()
 
@@ -69,38 +80,46 @@ OUTPUT FORMAT:
 "urgency": "low | medium | high",
 "create_task": true/false,
 "description": "clean summary",
-"resolution": true/false
+"resolution": true/false,
+"reference_intent": ""
 }}
 
 ---
 
-🚨 CRITICAL DECISION RULE
+🚨 CRITICAL RULE
 
-If message requires staff action:
-"type" MUST be "task"
-"create_task" MUST be true
+If requires staff action → MUST be task
 
 ---
 
 🧠 DECISION PRIORITY
 
-1. Requires action → task
-2. Status check → followup
-3. Question → query
-4. Greeting → greeting
-5. Else → noise
+1. Task
+2. Followup
+3. Query
+4. Greeting
+5. Noise
 
 ---
 
-🔁 RESOLUTION RULE
+🔁 FOLLOW-UP LINKING
 
-If guest confirms issue is solved:
-- type → followup
-- create_task → false
-- resolution → true
+If message is followup:
+- Identify WHICH previous request it refers to
+- Set "reference_intent" accordingly
 
-Else:
-- resolution → false
+Example:
+"Still not received towels" → housekeeping  
+"AC still not fixed" → maintenance  
+
+If unclear → "unknown"
+
+---
+
+🔁 RESOLUTION
+
+If solved:
+- resolution = true
 
 ---
 
@@ -108,7 +127,6 @@ Else:
 
 - ONLY JSON
 - ALL fields required
-- NO extra text
 
 ---
 
@@ -139,29 +157,18 @@ Message: "{message}"
             "urgency": "medium",
             "create_task": True,
             "description": message,
-            "resolution": False
+            "resolution": False,
+            "reference_intent": "unknown"
         }
 
 # ---------- VALIDATION ----------
 
 def validate_ai_output(data, original_msg):
-    required = ["type", "intent", "urgency", "create_task", "description", "resolution"]
+    required = ["type", "intent", "urgency", "create_task", "description", "resolution", "reference_intent"]
 
     for field in required:
         if field not in data:
-            raise ValueError(f"Missing field: {field}")
-
-    if data["type"] not in ["greeting", "task", "query", "followup", "noise"]:
-        data["type"] = "task"
-
-    if data["urgency"] not in ["low", "medium", "high"]:
-        data["urgency"] = "medium"
-
-    if not isinstance(data["create_task"], bool):
-        data["create_task"] = data["type"] == "task"
-
-    if not isinstance(data["resolution"], bool):
-        data["resolution"] = False
+            data[field] = "unknown" if field == "reference_intent" else False
 
     if not data["description"]:
         data["description"] = original_msg
@@ -186,41 +193,38 @@ def build_reply(msg_type):
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp():
     msg = request.values.get("Body", "").strip()
-    real_user = request.values.get("From", "")
-    print("REAL NUMBER:", real_user)
-
-    # TEMP override
     user = "whatsapp:+917780210871"
 
-    print("INCOMING:", msg, "| USER:", user)
+    print("INCOMING:", msg)
 
-    if not msg:
-        return "<Response><Message>Please tell me how I can help.</Message></Response>"
-
-    # AI + validation
-    ai_data = ai_classify(msg)
-    ai_data = validate_ai_output(ai_data, msg)
+    ai_data = validate_ai_output(ai_classify(msg), msg)
 
     print("FINAL AI:", ai_data)
 
     msg_type = ai_data["type"]
 
-    # ---------- RESOLUTION (CLEAN) ----------
+    # ---------- RESOLUTION ----------
     if ai_data["resolution"]:
         task = get_latest_active(user)
         if task:
             cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task[0],))
             conn.commit()
-
-            send_whatsapp(STAFF_NUMBER, f"✅ TASK #{task[0]} marked completed by guest")
-
+            send_whatsapp(STAFF_NUMBER, f"✅ TASK #{task[0]} marked completed")
         return "<Response><Message>Great 👍 Happy to help.</Message></Response>"
 
-    # ---------- FOLLOWUP ----------
+    # ---------- FOLLOWUP (INTENT BASED) ----------
     if msg_type == "followup":
-        task = get_latest_active(user)
+        task = None
+
+        if ai_data["reference_intent"] != "unknown":
+            task = get_task_by_intent(user, ai_data["reference_intent"])
+
+        if not task:
+            task = get_latest_active(user)
+
         if task:
             send_whatsapp(STAFF_NUMBER, f"🚨 FOLLOW-UP on TASK #{task[0]}")
+
         return "<Response><Message>Sorry about that, we're expediting this.</Message></Response>"
 
     # ---------- NON-TASK ----------
@@ -245,12 +249,7 @@ def whatsapp():
         task_id = cur.fetchone()[0]
         conn.commit()
 
-        print("TASK CREATED:", task_id)
-
-        send_whatsapp(
-            STAFF_NUMBER,
-            f"🆕 TASK #{task_id}\n{ai_data['description']}"
-        )
+        send_whatsapp(STAFF_NUMBER, f"🆕 TASK #{task_id}\n{ai_data['description']}")
 
     return f"<Response><Message>{build_reply(msg_type)}</Message></Response>"
 
