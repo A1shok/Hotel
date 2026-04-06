@@ -46,13 +46,20 @@ def send_whatsapp(to, msg):
 
 # ---------- DB HELPERS ----------
 
-def get_latest_active(user):
+def get_followup_task(user):
     cur.execute("""
-    SELECT id, intent, priority FROM tasks
+    SELECT id, intent, created_at FROM tasks
     WHERE user_number=%s AND status='Active'
-    ORDER BY id DESC LIMIT 1
+    ORDER BY created_at ASC
     """, (user,))
-    return cur.fetchone()
+    
+    tasks = cur.fetchall()
+    
+    if not tasks:
+        return None
+
+    # Return oldest active task (most likely pending)
+    return tasks[0]
 
 # ---------- AI ----------
 
@@ -172,7 +179,7 @@ def whatsapp():
 
     # ---------- RESOLUTION HANDLING ----------
     if msg_type == "followup" and "resolved" in ai_data["description"].lower():
-        task = get_latest_active(user)
+        task = get_followup_task(user)
         if task:
             cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task[0],))
             conn.commit()
