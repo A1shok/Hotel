@@ -11,10 +11,6 @@ CORS(app)
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 conn = psycopg2.connect(os.environ.get("DATABASE_URL"))
 cur = conn.cursor()
-# TEMP: CLEAR DB (RUN ONCE, THEN REMOVE)
-cur.execute("TRUNCATE TABLE tasks RESTART IDENTITY;")
-conn.commit()
-print("DB CLEARED")
 
 STAFF_NUMBER = "whatsapp:+916303484136"
 
@@ -157,8 +153,8 @@ def whatsapp():
     msg = request.values.get("Body", "").strip()
     real_user = request.values.get("From", "")
     print("REAL NUMBER:", real_user)
-    
-    # TEMP OVERRIDE (use your working number)
+
+    # TEMP OVERRIDE
     user = "whatsapp:+917780210871"
 
     print("INCOMING:", msg, "| USER:", user)
@@ -173,9 +169,10 @@ def whatsapp():
     print("FINAL AI:", ai_data)
 
     msg_type = ai_data["type"]
+    desc = ai_data["description"].lower()
 
-    # ---------- RESOLUTION HANDLING ----------
-    if msg_type == "followup" and "resolved" in ai_data["description"].lower():
+    # ---------- RESOLUTION FIX ----------
+    if msg_type == "followup" and any(word in desc for word in ["fixed", "resolved", "done", "completed"]):
         task = get_latest_active(user)
         if task:
             cur.execute("UPDATE tasks SET status='Completed' WHERE id=%s", (task[0],))
@@ -192,14 +189,13 @@ def whatsapp():
             send_whatsapp(STAFF_NUMBER, f"🚨 FOLLOW-UP on TASK #{task[0]}")
         return "<Response><Message>Sorry about that, we're expediting this.</Message></Response>"
 
-    # ---------- GREETING / QUERY / NOISE ----------
+    # ---------- NON-TASK ----------
     if msg_type in ["greeting", "query", "noise"]:
         return f"<Response><Message>{build_reply(msg_type)}</Message></Response>"
 
-    # ---------- DUPLICATE ----------
-    existing = get_latest_active(user)
-    if existing and existing[1] == ai_data["intent"]:
-        return "<Response><Message>We're already working on your previous request 👍</Message></Response>"
+    # ---------- GARBAGE TASK BLOCK ----------
+    if ai_data["create_task"] and len(ai_data["description"].split()) < 2:
+        return "<Response><Message>Could you please provide more details?</Message></Response>"
 
     # ---------- TASK CREATION ----------
     if ai_data["create_task"]:
